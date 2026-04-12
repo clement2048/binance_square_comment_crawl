@@ -83,6 +83,21 @@ def is_probable_author_line(line: str) -> bool:
 
 
 def find_post_header(lines: list[str]) -> tuple[int, str, str]:
+    short_post_markers = {"短帖", "鐭笘"}
+    for idx, line in enumerate(lines):
+        if line not in short_post_markers:
+            continue
+        for look_ahead in range(idx + 1, min(idx + 8, len(lines) - 1)):
+            author = lines[look_ahead]
+            time_text = lines[look_ahead + 1]
+            if is_probable_author_line(author) and TIME_PATTERN.match(time_text):
+                author_username = ""
+                for back in range(max(0, idx - 3), idx):
+                    if USERNAME_PATTERN.match(lines[back]):
+                        author_username = lines[back].lstrip("@")
+                        break
+                return look_ahead, author, author_username
+
     for idx in range(len(lines) - 2):
         line = lines[idx]
         next_line = lines[idx + 1]
@@ -237,7 +252,11 @@ def parse_txt_file(path: Path) -> dict[str, Any]:
     lines = [clean_line(line) for line in path.read_text(encoding="utf-8").splitlines()]
     lines = [line for line in lines if line]
 
-    header_idx, author, author_username = find_post_header(lines)
+    try:
+        header_idx, author, author_username = find_post_header(lines)
+    except ValueError as exc:
+        preview = "\n".join(lines[:80])
+        raise ValueError(f"{exc}\n文件: {path}\n预览:\n{preview}") from exc
     post_time = lines[header_idx + 2]
     body_lines, comment_start_idx = collect_post_body(lines, header_idx + 3)
     content_lines, meta = split_post_body_and_meta(body_lines)
