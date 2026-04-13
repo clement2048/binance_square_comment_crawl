@@ -25,7 +25,7 @@ from typing import Any
 
 
 # 正则表达式和标记定义
-TIME_PATTERN = re.compile(r"^\d+\s*(秒钟?|分钟|小时|天|周|月|年)$")  # 时间格式匹配
+TIME_PATTERN = re.compile(r"^(\d+\s*(秒钟?|分钟|小时|天|周|月|年)|[A-Z][a-z]{2} \d+|\d+[smhdw])$", re.IGNORECASE)  # 时间格式匹配 (如: 3h, Apr 10)
 USERNAME_PATTERN = re.compile(r"^@[A-Za-z0-9_.-]+$")  # 用户名格式匹配
 PAIR_PATTERN = re.compile(r"\b[A-Z0-9]{2,15}USDT\b")  # 交易对匹配（如BTCUSDT）
 SYMBOL_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,9}\b")  # 代币符号匹配
@@ -33,34 +33,53 @@ SYMBOL_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,9}\b")  # 代币符号匹配
 # 页面底部标记，用于识别帖子内容结束位置
 FOOTER_MARKERS = {
     "相关创作者",
+    "Relevant Creator",
     "网站地图",
+    "Sitemap",
     "Cookie偏好设置",
+    "Cookie Preferences",
     "平台条款和条件",
+    "Platform T&Cs",
     "我们使用 Cookie",
+    "We use \"Strictly Necessary\" cookies to keep our site reliable and secure. We’d like to set additional cookies to understand site usage, make site improvements, to remember your settings and to assist in our marketing efforts.",
     "接受所有 Cookie",
+    "Accept Cookies & Continue Reject Additional Cookies",
     "全部拒绝",
     "Cookie 设置",
+    "Manage Cookies",
 }
 
 # 导航标记，用于过滤非内容部分
 NAV_MARKERS = {
     "自动翻译",
+    "Auto Translation",
     "发现",
+    "Discover",
     "正在关注",
+    "Following",
     "新闻",
+    "News",
     "通知",
+    "Notification",
     "个人主页",
+    "Profile",
     "书签",
+    "Bookmarks",
     "聊天",
+    "Chats",
     "历史记录",
+    "History",
     "创作者中心",
+    "Creator Center",
     "设置",
+    "Settings",
     "发文",
+    "Post",
     "短帖",
 }
 
 # 互动信息行匹配（回复数、引用数、点赞数等）
-ENGAGEMENT_LINE = re.compile(r"^(回复\s*\d+|引用\s*\d+|最相关|\d+(\.\d+)?k?)$")
+ENGAGEMENT_LINE = re.compile(r"^(回复\s*\d+|引用\s*\d+|最相关|\d+(\.\d+)?k?|Replies\s*\d+|Quote\s*\d+|Most relevant|Show More Replies|查看更多回复)$")
 COMMENT_SPLITTER = re.compile(r"^\S.*$")
 
 
@@ -127,9 +146,9 @@ def is_probable_author_line(line: str) -> bool:
         return False
     if TIME_PATTERN.match(line):
         return False
-    if line.startswith("回复") or line.startswith("引用") or line == "最相关":
+    if line.startswith("回复") or line.startswith("引用") or line.startswith("Replies ") or line.startswith("Quote ") or line.startswith("Reply") or line in ["最相关", "Most relevant"]:
         return False
-    if "免责声明" in line:
+    if "免责声明" in line or "Disclaimer" in line:
         return False
     if len(line) > 40:
         return False
@@ -151,7 +170,7 @@ def is_probable_author_line(line: str) -> bool:
     如果没有找到头部信息，抛出ValueError
 """
 def find_post_header(lines: list[str]) -> tuple[int, str, str]:
-    short_post_markers = {"短帖", "鐭笘"}
+    short_post_markers = {"短帖", "鐭笘", "Post"}
     for idx, line in enumerate(lines):
         if line not in short_post_markers:
             continue
@@ -199,9 +218,9 @@ def collect_post_body(lines: list[str], start_idx: int) -> tuple[list[str], int]
         if not line:
             idx += 1
             continue
-        if line == "最相关":
+        if line in ["最相关", "Most relevant"]:
             break
-        if line.startswith("免责声明："):
+        if line.startswith("免责声明：") or line.startswith("Disclaimer:"):
             body.append(line)
             idx += 1
             continue
@@ -245,13 +264,13 @@ def split_post_body_and_meta(body_lines: list[str]) -> tuple[list[str], dict[str
     content_lines: list[str] = []
 
     for line in body_lines:
-        if line.startswith("回复 "):
-            meta["reply_count"] = line.replace("回复", "").strip()
+        if line.startswith("回复 ") or line.startswith("Replies "):
+            meta["reply_count"] = line.replace("回复", "").replace("Replies", "").strip()
             continue
-        if line.startswith("引用 "):
-            meta["quote_count"] = line.replace("引用", "").strip()
+        if line.startswith("引用 ") or line.startswith("Quote "):
+            meta["quote_count"] = line.replace("引用", "").replace("Quote", "").strip()
             continue
-        if line == "展示被折叠的评论":
+        if line in ["展示被折叠的评论", "Show collapsed comments"]:
             meta["folded_comment_marker"] = line
             continue
         if PAIR_PATTERN.search(line) and not meta["trade_pair"]:
@@ -302,7 +321,7 @@ def parse_comments(lines: list[str], start_idx: int) -> list[dict[str, str]]:
 
     comments: list[dict[str, str]] = []
     idx = start_idx
-    if idx < len(lines) and lines[idx] == "最相关":
+    if idx < len(lines) and lines[idx] in ["最相关", "Most relevant"]:
         idx += 1
 
     while idx < len(lines):
@@ -312,7 +331,7 @@ def parse_comments(lines: list[str], start_idx: int) -> list[dict[str, str]]:
             continue
         if line in FOOTER_MARKERS:
             break
-        if line == "展示被折叠的评论":
+        if line in ["展示被折叠的评论", "Show collapsed comments"]:
             idx += 1
             continue
 
@@ -336,7 +355,7 @@ def parse_comments(lines: list[str], start_idx: int) -> list[dict[str, str]]:
                 continue
             if current in FOOTER_MARKERS:
                 break
-            if current == "查看翻译":
+            if current in ["查看翻译", "See translation"]:
                 idx += 1
                 continue
             if idx + 2 < len(lines) and lines[idx + 1] == "·" and TIME_PATTERN.match(lines[idx + 2]):
@@ -344,7 +363,7 @@ def parse_comments(lines: list[str], start_idx: int) -> list[dict[str, str]]:
             if ENGAGEMENT_LINE.match(current):
                 idx += 1
                 continue
-            if current == "展示被折叠的评论":
+            if current in ["展示被折叠的评论", "Show collapsed comments"]:
                 idx += 1
                 break
             comment_lines.append(current)

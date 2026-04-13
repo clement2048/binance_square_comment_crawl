@@ -32,7 +32,17 @@ COMMENT_DEBUG_DIR_NAME = "binance_square_comment_debug"
 PAGE_DUMP_DIR_NAME = "binance_square_page_dump"
 
 
+"""
+解析并返回所有命令行参数的配置对象，该对象控制爬虫的核心行为。
+
+该函数定义了完整的爬虫配置接口，包括帖子来源选择、抓取数量限制、浏览器设置、
+登录控制、输出配置等，支持API和首页滚动两种抓取模式。
+
+返回值:
+    argparse.Namespace: 包含所有命令行参数值的对象，这些值将在整个爬虫流程中使用
+"""
 def parse_args() -> argparse.Namespace:
+    """解析命令行参数，返回包含所有抓取配置（页数、帖子数、评论数、是否等待登录等）的命名空间对象。"""
     parser = argparse.ArgumentParser(
         description="抓取币安广场帖子列表以及评论，并导出 CSV/JSON 文件。"
     )
@@ -129,6 +139,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+"""
+构建并配置用于API请求的requests.Session对象，包含重试机制、头部信息和代理设置。
+
+该会话配置了自动重试（针对500系列错误和429限流），设置了Binance网站所需的完整HTTP头部，
+包括User-Agent、Accept-Language等，并提供了代理控制选项。
+
+参数:
+    lang: 语言代码，如'zh-CN'，用于设置Accept-Language头
+    retries: HTTP请求失败时的重试次数
+
+返回值:
+    requests.Session: 配置好的请求会话，用于后续的HTTP调用
+"""
 def build_session(lang: str, retries: int) -> requests.Session:
     session = requests.Session()
     session.trust_env = False
@@ -162,14 +185,45 @@ def build_session(lang: str, retries: int) -> requests.Session:
     return session
 
 
+"""
+创建目录（如果不存在），支持创建多级父目录。
+
+这是文件系统操作的辅助函数，用于确保输出目录、调试目录等路径存在，
+避免在写入文件时因目录不存在而失败。
+
+参数:
+    path: 需要确保存在的目录路径
+"""
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+"""
+将字符串转换为安全文件名，使用下划线替换不安全的字符。
+
+用于为页面保存内容（HTML、TXT、截图）生成文件名，避免因特殊字符导致的文件系统问题。
+
+参数:
+    value: 原始字符串，如帖子ID或页面标题
+    
+返回值:
+    str: 仅包含字母、数字、点、连字符和下划线的安全文件名
+"""
 def safe_filename(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_") or "page"
 
 
+"""
+将时间戳（毫秒或秒）转换为可读的日期时间字符串。
+
+处理两种格式的时间戳：毫秒级（>10^12）和秒级，将UNIX时间戳转换为标准的YYYY-MM-DD HH:MM:SS格式。
+
+参数:
+    value: 时间戳值，可以是字符串、整数或None
+    
+返回值:
+    str: 格式化后的日期时间字符串，如果输入为空则返回空字符串
+"""
 def timestamp_to_text(value: Any) -> str:
     if value in (None, ""):
         return ""
@@ -181,10 +235,34 @@ def timestamp_to_text(value: Any) -> str:
     return date_value.strftime("%Y-%m-%d %H:%M:%S")
 
 
+"""
+清理文本内容，移除多余空白字符（多个连续空格、换行等）。
+
+这是文本处理的基础函数，用于标准化从页面或API获取的文本内容，
+确保后续处理不受空白字符格式差异的影响。
+
+参数:
+    text: 原始文本内容
+    
+返回值:
+    str: 清理后的文本，多个连续空白字符替换为单个空格，并去除首尾空格
+"""
 def clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
+"""
+判断文本是否是有意义的评论内容，过滤UI元素、时间提示和无意义文本。
+
+通过多级筛选排除非评论内容：1) 精确匹配过滤词（如"回复"、"点赞"）；2) 纯数字/符号组合；
+3) 时间格式文本（如"5分钟"、"2小时前"）。这是评论数据质量保证的关键函数。
+
+参数:
+    text: 待判断的文本内容
+    
+返回值:
+    bool: 如果文本被认为是有意义的真实评论则返回True，否则返回False
+"""
 def is_meaningful_comment(text: str) -> bool:
     if not text:
         return False
@@ -218,6 +296,23 @@ def is_meaningful_comment(text: str) -> bool:
     return True
 
 
+"""
+通过API分页获取Binance Square帖子列表。
+
+调用Binance官方新闻流接口，按指定页数和每页数量爬取帖子数据。
+使用增量策略：遇到空页时提前停止，避免不必要的请求。
+这是"news"模式的核心数据来源函数。
+
+参数:
+    session: 配置好的HTTP会话对象
+    news_api: API端点URL
+    pages: 最大爬取页数
+    page_size: 每页帖子数量
+    timeout: 请求超时时间（秒）
+
+返回值:
+    list[dict]: 原始API响应中的帖子数据列表，每个元素包含完整的帖子信息
+"""
 def fetch_posts(
     session: requests.Session,
     news_api: str,
@@ -245,6 +340,21 @@ def fetch_posts(
     return rows
 
 
+"""
+测试API连接性和网络可达性，使用最小请求验证配置是否正确。
+
+这是网络检查模式（--check-only）的核心函数，通过一次小型请求验证：
+1. 网络是否可以访问Binance API；2. 代理配置是否正确；3. API响应格式是否符合预期。
+
+参数:
+    session: 配置好的HTTP会话对象
+    news_api: API端点URL
+    timeout: 请求超时时间（秒）
+
+返回值:
+    dict: 包含连接状态信息的字典：ok(是否成功)、status_code(HTTP状态码)、
+          sample_count(采样帖子数)、url(实际请求URL)
+"""
 def check_connectivity(session: requests.Session, news_api: str, timeout: int) -> dict[str, Any]:
     params = {
         "pageIndex": 1,
@@ -265,6 +375,21 @@ def check_connectivity(session: requests.Session, news_api: str, timeout: int) -
     }
 
 
+"""
+将原始API帖子数据标准化为统一的结构化格式。
+
+处理API返回的原始JSON，提取关键字段并进行清理，将不同格式的时间戳、
+作者信息、统计数值等转换为一致的格式，用于后续的CSV导出。
+这是数据清洗和标准化的关键转换层。
+
+参数:
+    item: 原始API响应中的一个帖子数据字典
+    
+返回值:
+    dict: 标准化的帖子信息，包含post_id, time, title, subtitle, content,
+          author, author_username, like_count, comment_count, view_count,
+          share_count, related_symbols, link等字段
+"""
 def normalize_post(item: dict[str, Any]) -> dict[str, Any]:
     title = clean_text(item.get("title", ""))
     subtitle = clean_text(item.get("subTitle", ""))
@@ -319,6 +444,18 @@ def dedupe_rows(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     return result
 
 
+"""
+从API响应payload中递归提取所有评论文本。
+
+通过深度优先遍历JSON结构，查找候选键名（content, comment, text等）对应的字符串值，
+并调用is_meaningful_comment过滤非评论内容。这是评论API响应的第一层解析。
+
+参数:
+    payload: API响应数据（字典、列表或嵌套结构）
+    
+返回值:
+    list[str]: 提取出的评论文本列表，已过滤无意义内容
+"""
 def extract_comment_texts_from_payload(payload: Any) -> list[str]:
     candidate_keys = {
         "content",
@@ -348,6 +485,19 @@ def extract_comment_texts_from_payload(payload: Any) -> list[str]:
     return results
 
 
+"""
+从字典节点中提取第一个匹配给定键名的字符串值（键名大小写不敏感）。
+
+这是评论数据提取的辅助函数，支持嵌套查找：如果在当前层级没找到，
+会递归到嵌套字典中搜索。用于提取评论文本、作者名等字段。
+
+参数:
+    node: JSON节点（通常是字典）
+    keys: 候选键名列表，会按顺序尝试查找
+    
+返回值:
+    str: 找到的第一个非空字符串值，否则返回空字符串
+"""
 def extract_first_string(node: Any, keys: list[str]) -> str:
     if not isinstance(node, dict):
         return ""
@@ -474,6 +624,20 @@ def extract_comment_rows_from_payload(
     return results[:max_comments]
 
 
+"""
+创建并启动Playwright浏览器上下文，支持持久化用户目录以保持登录状态。
+
+这是浏览器自动化的入口函数，根据配置决定使用无头模式还是可见模式，
+并支持使用持久化用户目录（用于复用登录态）或创建临时会话。
+是"square-home"模式评论抓取的基础设施。
+
+参数:
+    headless: 是否使用无头模式（无GUI界面）
+    user_data_dir: Chromium用户数据目录路径，用于持久化登录信息
+    
+返回值:
+    tuple: (playwright对象, 浏览器上下文对象)，需要在结束时调用safe_close_browser释放资源
+"""
 def create_browser_context(headless: bool, user_data_dir: str) -> tuple[Any, BrowserContext]:
     if sync_playwright is None:
         raise RuntimeError(
@@ -503,6 +667,18 @@ def safe_close_browser(playwright_obj: Any, context: BrowserContext) -> None:
         playwright_obj.stop()
 
 
+"""
+尝试点击评论入口按钮，展开评论区。
+
+使用多种CSS选择器尝试找到并点击评论按钮，支持中英文界面。
+这是触发评论懒加载的关键步骤，因为很多页面的评论内容需要用户交互才会完全加载。
+
+参数:
+    page: Playwright页面对象
+    
+返回值:
+    bool: 是否成功找到并点击了评论按钮
+"""
 def click_comment_entry(page: Page) -> bool:
     selectors = [
         "button:has-text('评论')",
@@ -639,6 +815,20 @@ def extract_comment_cards_from_dom(page: Page, post_id: str, source_url: str, ma
     return rows
 
 
+"""
+从页面DOM中提取帖子标题、内容、作者、相关币种等元数据。
+
+使用多种选择器策略（OG标签、数据测试ID、类名等）从完整页面提取信息，
+包括：1) 帖子标题（优先OG标签）；2) 正文内容；3) 作者信息（含用户名）；
+4) 相关币种符号（从美元符号标记和价格链接提取）。
+这是直接从页面补充API数据缺失字段的关键函数。
+
+参数:
+    page: Playwright页面对象
+    
+返回值:
+    dict: 包含title, content, author, author_username, related_symbols的元数据字典
+"""
 def extract_post_meta_from_page(page: Page) -> dict[str, Any]:
     title = ""
     content = ""
@@ -738,6 +928,24 @@ def extract_post_meta_from_page(page: Page) -> dict[str, Any]:
     }
 
 
+"""
+使用浏览器直接采集Binance Square首页的帖子链接。
+
+替代API模式，通过模拟用户滚动浏览首页来抓取帖子链接。
+核心流程：1) 打开首页；2) 手动登录（如需要）；3) 滚动并收集帖子链接；
+4) 构建最小帖子信息。这是"square-home"来源模式的核心实现。
+
+参数:
+    lang: 页面语言代码
+    max_posts: 最大采集帖子数
+    headless: 是否无头模式
+    pause_seconds: 滚动间隔时间
+    user_data_dir: Chromium用户数据目录
+    wait_for_login: 是否等待手动登录
+    
+返回值:
+    list[dict]: 包含基本信息（post_id, link）的帖子字典列表
+"""
 def collect_posts_from_square_home(
     lang: str,
     max_posts: int,
@@ -889,6 +1097,34 @@ def fetch_comments_for_posts(
                     page.mouse.wheel(0, 2400)
                     page.wait_for_timeout(1200)
 
+                # ========== NEW: Click all "Show More Replies" ==========
+                try:
+                    show_more_selectors = [
+                        "button:has-text('Show More Replies')",
+                        "button:has-text('查看更多回复')",
+                        "[data-testid*='show-more']",
+                        "div:has-text('Show More Replies')",
+                        "div:has-text('查看更多回复')",
+                        "span:has-text('Show More Replies')"
+                    ]
+                    for _ in range(5): # Try multiple passes in case new ones appear
+                        clicked_any = False
+                        for sel in show_more_selectors:
+                            try:
+                                locators = page.locator(sel).all()
+                                for loc in locators:
+                                    if loc.is_visible(timeout=500):
+                                        loc.click(timeout=1000)
+                                        page.wait_for_timeout(800)
+                                        clicked_any = True
+                            except Exception:
+                                pass
+                        if not clicked_any:
+                            break
+                except Exception:
+                    pass
+                # ========================================================
+
                 comment_rows = api_comments[:max_comments]
                 source_kind = "api"
                 if not comment_rows:
@@ -943,6 +1179,20 @@ def fetch_comments_for_posts(
     return rows
 
 
+"""
+将数据列表写入CSV文件，使用UTF-8 with BOM编码以确保Excel兼容。
+
+这是数据导出的核心函数，处理三项主要输出：帖子CSV、评论CSV、合并CSV。
+使用DictWriter确保列顺序一致，并添加BOM头以便在Excel中正确显示中文。
+
+参数:
+    path: 输出文件路径
+    rows: 要写入的数据行列表（字典列表）
+    fieldnames: CSV文件的列名顺序
+    
+返回值:
+    None: 文件被写入磁盘
+"""
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
     with path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -954,6 +1204,21 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+"""
+保存页面完整内容到本地，包括HTML、纯文本和截图。
+
+实现数据冗余备份和可视化Debug：1) 原始HTML（用于DOM分析）；
+2) 纯文本（用于后续离线解析）；3) 全页截图（用于视觉验证）。
+这是--dump-page参数的核心实现，为离线分析提供完整数据。
+
+参数:
+    page: Playwright页面对象
+    dump_dir: 保存内容的目录
+    post_id: 帖子ID，用作文件名基础
+    
+返回值:
+    None: 三种格式的文件被写入指定目录
+"""
 def dump_page_content(page: Page, dump_dir: Path, post_id: str) -> None:
     ensure_dir(dump_dir)
     base = safe_filename(post_id)
@@ -979,6 +1244,20 @@ def dump_page_content(page: Page, dump_dir: Path, post_id: str) -> None:
         pass
 
 
+"""
+将帖子信息和评论数据按post_id进行合并，生成宽表格式。
+
+创建数据关联视图：对于每条评论，查找对应的帖子信息并整合为一行。
+便于分析评论与帖子内容的关联关系，例如：某条评论对应的帖子作者、标题、币种等。
+这是生成最终合并CSV的核心函数。
+
+参数:
+    posts: 帖子信息列表
+    comments: 评论信息列表
+    
+返回值:
+    list[dict]: 合并后的数据行，每行包含评论信息和关联的帖子信息
+"""
 def merge_post_comment_rows(
     posts: list[dict[str, Any]],
     comments: list[dict[str, Any]],
@@ -1010,6 +1289,20 @@ def merge_post_comment_rows(
     return merged
 
 
+"""
+Binance Square抓取脚本的主入口函数，协调整个爬取流程的各个阶段。
+
+核心执行逻辑：
+1. 解析命令行参数，初始化输出目录和调试目录
+2. 根据source参数选择数据获取模式（news API模式 / square-home 浏览器模式）
+3. 获取帖子数据并导出CSV和JSON格式
+4. 根据配置决定是否抓取评论数据（可跳过）
+5. 抓取评论数据（通过浏览器自动化和API响应拦截）
+6. 合并帖子与评论数据，输出完整的关联CSV
+7. 可选的调试功能：保存页面内容、评论API响应等
+
+这是整个应用程序的编排层，将各个功能模块组合成完整的工作流。
+"""
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
