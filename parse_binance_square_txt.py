@@ -150,7 +150,12 @@ def is_probable_author_line(line: str) -> bool:
         return False
     if "免责声明" in line or "Disclaimer" in line:
         return False
-    if len(line) > 40:
+    # 放宽长度限制：有些作者名可能较长（如 "CryptoAnalysisExpert"）
+    # 同时避免过长的帖子标题被识别为作者
+    if len(line) > 60:
+        return False
+    # 排除纯英文大写字母（很可能是标题而非作者名）
+    if re.fullmatch(r"[A-Z0-9!.,?@#$%^&*()\-\[\]{}\'\"\s]+$", line):
         return False
     return True
 
@@ -185,16 +190,51 @@ def find_post_header(lines: list[str]) -> tuple[int, str, str]:
                         break
                 return look_ahead, author, author_username
 
+    # 2. 标准格式：支持两种头部结构
     for idx in range(len(lines) - 2):
         line = lines[idx]
         next_line = lines[idx + 1]
-        next_next = lines[idx + 2]
+        
+        # 情况A：作者 → @用户名 → 时间（完整的三行结构）
+        if idx + 2 < len(lines):
+            next_next = lines[idx + 2]
+            if (
+                is_probable_author_line(line)
+                and USERNAME_PATTERN.match(next_line)
+                and TIME_PATTERN.match(next_next)
+            ):
+                return idx, line, next_line.lstrip("@")
+        
+        # 情况B：作者 → 时间（没有用户名的情况，常见于英文界面）
         if (
             is_probable_author_line(line)
-            and USERNAME_PATTERN.match(next_line)
-            and TIME_PATTERN.match(next_next)
+            and TIME_PATTERN.match(next_line)
+            and (idx == 0 or not USERNAME_PATTERN.match(lines[idx - 1]))
         ):
-            return idx, line, next_line.lstrip("@")
+            # 向前查找可能的用户名（可能在前面几行）
+            author_username = ""
+            for back in range(max(0, idx - 5), idx):
+                if USERNAME_PATTERN.match(lines[back]):
+                    author_username = lines[back].lstrip("@")
+                    break
+            return idx, line, author_username
+
+    # 3. 容错处理：如果上面都没找到，尝试更宽松的查找
+    # 查找任何可能的"作者 + 时间"组合（不限相邻，间隔1-3行）
+    for idx in range(len(lines) - 1):
+        line = lines[idx]
+        # 在当前行后面查找时间行
+        for time_idx in range(idx + 1, min(idx + 4, len(lines))):
+            time_text = lines[time_idx]
+            if is_probable_author_line(line) and TIME_PATTERN.match(time_text):
+                # 查找可能的用户名
+                author_username = ""
+                for back in range(max(0, idx - 5), idx):
+                    if USERNAME_PATTERN.match(lines[back]):
+                        author_username = lines[back].lstrip("@")
+                        break
+                return idx, line, author_username
+
     raise ValueError("未找到帖子头部信息")
 
 
