@@ -20,7 +20,6 @@ from crawler_comment import extract_post_meta_from_page
 from crawler_util import clean_text
 from crawler_util import dump_page_content
 from crawler_util import ensure_dir
-from crawler_util import is_meaningful_comment
 from crawler_util import timestamp_to_text
 
 try:
@@ -539,33 +538,172 @@ def fetch_comments_for_posts(
                     page.mouse.wheel(0, 2400)
                     page.wait_for_timeout(1200)
 
-                # ========== NEW: Click all "Show More Replies" ==========
+                # Expand as many replies/collapsed comments as possible.
                 try:
-                    show_more_selectors = [
+                    expand_selectors = [
                         "button:has-text('Show More Replies')",
+                        "button:has-text('Show collapsed comments')",
+                        "button:has-text('Show Collapsed Comments')",
+                        "button:has-text('Show more comments')",
+                        "button:has-text('Show More Comments')",
+                        "button:has-text('More Replies')",
+                        "button:has-text('More comments')",
+                        "button:has-text('More Comments')",
                         "button:has-text('查看更多回复')",
-                        "[data-testid*='show-more']",
-                        "div:has-text('Show More Replies')",
-                        "div:has-text('查看更多回复')",
-                        "span:has-text('Show More Replies')"
+                        "button:has-text('展示被折叠的评论')",
+                        "button:has-text('显示被折叠的评论')",
+                        "div.cursor-pointer.text-center.t-subtitle2:has-text('Show collapsed comments')",
+                        "div.cursor-pointer.text-center.t-subtitle2:has-text('Show Collapsed Comments')",
+                        "div.cursor-pointer.text-center.t-subtitle2:has-text('展示被折叠的评论')",
+                        "div.cursor-pointer.text-center.t-subtitle2:has-text('显示被折叠的评论')",
+                        "div[class*='cursor-pointer'][class*='text-center'][class*='t-subtitle2']:has-text('Show collapsed comments')",
+                        "div[class*='cursor-pointer'][class*='text-center'][class*='t-subtitle2']:has-text('Show Collapsed Comments')",
+                        "button[data-testid*='show-more']",
+                        "[role='button'][data-testid*='show-more']",
+                        "[data-qa*='expand']",
+                        "[data-qa*='show-more']",
+                        "button[aria-label*='reply' i]",
+                        "button[aria-label*='collapsed' i]",
+                        "button[aria-label*='show' i][aria-label*='more' i]",
+                        "button[aria-label*='expand' i]",
+                        "[role='button'][aria-label*='reply' i]",
+                        "[role='button'][aria-label*='collapsed' i]",
+                        "[role='button'][aria-label*='show' i][aria-label*='more' i]",
+                        "[role='button'][aria-label*='expand' i]",
                     ]
-                    for _ in range(5): # Try multiple passes in case new ones appear
+                    max_expand_rounds = 20
+                    max_per_selector = 100
+                    no_click_rounds = 0
+                    no_match_rounds = 0
+                    stalled_rounds = 0
+                    total_clicked = 0
+                    stop_reason = "max_rounds"
+                    print(f"[expansion] start post_id={post_id}")
+
+                    for round_idx in range(1, max_expand_rounds + 1):
                         clicked_any = False
-                        for sel in show_more_selectors:
+                        round_clicks = 0
+                        round_matches = 0
+                        round_visible = 0
+                        for sel in expand_selectors:
                             try:
-                                locators = page.locator(sel).all()
-                                for loc in locators:
-                                    if loc.is_visible(timeout=500):
-                                        loc.click(timeout=1000)
-                                        page.wait_for_timeout(800)
+                                locator = page.locator(sel)
+                                count = locator.count()
+                                round_matches += count
+                                for idx in range(min(count, max_per_selector)):
+                                    loc = locator.nth(idx)
+                                    if not loc.is_visible(timeout=300):
+                                        continue
+
+                                    round_visible += 1
+
+                                    try:
+                                        tag_name = str(loc.evaluate("el => el.tagName", timeout=300) or "").upper()
+                                        if tag_name and tag_name not in {"BUTTON", "A", "DIV", "SPAN"}:
+                                            continue
+                                    except Exception:
+                                        pass
+
+                                    click_ok = False
+                                    for retry_idx in range(3):
+                                        before_url = page.url
+                                        try:
+                                            loc.scroll_into_view_if_needed(timeout=600)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            loc.hover(timeout=400)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            loc.click(timeout=1500)
+                                            click_ok = True
+                                        except Exception:
+                                            page.wait_for_timeout(250 + 200 * retry_idx)
+                                            continue
+
+                                        page.wait_for_timeout(850)
+                                        # Guard against accidental navigation caused by broad UI overlaps.
+                                        if page.url != before_url:
+                                            try:
+                                                page.go_back(wait_until="domcontentloaded", timeout=20000)
+                                                page.wait_for_timeout(1200)
+                                            except Exception:
+                                                # If back fails, keep current page and continue best-effort.
+                                                pass
+                                        break
+
+                                    if click_ok:
                                         clicked_any = True
+                                        round_clicks += 1
+                                        total_clicked += 1
                             except Exception:
                                 pass
+
+                        # Try scrolling likely comment containers first; fallback to page wheel.
+                        try:
+                            scroll_containers = page.locator(
+                                "[class*='comment'], [data-testid*='comment'], [role='region']"
+                            )
+                            for c_idx in range(min(scroll_containers.count(), 4)):
+                                try:
+                                    scroll_containers.nth(c_idx).evaluate(
+                                        "el => { el.scrollTop = (el.scrollTop || 0) + 3200; }",
+                                        timeout=300,
+                                    )
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        # Scroll to reveal more expandable entries loaded lazily.
+                        page.mouse.wheel(0, 3200)
+                        page.wait_for_timeout(1200)
+
+                        if round_matches == 0:
+                            no_match_rounds += 1
+                        else:
+                            no_match_rounds = 0
+
                         if not clicked_any:
+                            no_click_rounds += 1
+                            if round_visible > 0:
+                                stalled_rounds += 1
+                            else:
+                                stalled_rounds = 0
+                        else:
+                            no_click_rounds = 0
+                            stalled_rounds = 0
+
+                        print(
+                            f"[expansion] post_id={post_id} round={round_idx}/{max_expand_rounds} "
+                            f"matches={round_matches} visible={round_visible} clicked={round_clicks} total_clicked={total_clicked} "
+                            f"no_click_rounds={no_click_rounds} no_match_rounds={no_match_rounds} stalled_rounds={stalled_rounds}"
+                        )
+
+                        if no_match_rounds >= 3:
+                            stop_reason = "no_new_buttons_3_rounds"
                             break
+
+                        if no_click_rounds >= 5 and no_match_rounds >= 2:
+                            stop_reason = "stabilized_no_click_and_no_match"
+                            break
+
+                        if stalled_rounds >= 2 and no_click_rounds >= 2:
+                            stop_reason = "stalled_on_visible_buttons"
+                            break
+
+                    print(
+                        f"[expansion] done post_id={post_id} total_clicked={total_clicked} "
+                        f"stop_reason={stop_reason}"
+                    )
                 except Exception:
                     pass
-                # ========================================================
+
+                # Re-dump after expansion so offline parser reads the fuller HTML.
+                if page_dump_dir is not None:
+                    dump_page_content(page=page, dump_dir=page_dump_dir, post_id=post_id)
+                    print(f"[dump] saved expanded page dump for post_id={post_id}")
 
                 comment_rows = api_comments[:max_comments]
                 source_kind = "api"
@@ -584,7 +722,7 @@ def fetch_comments_for_posts(
                     seen: set[str] = set()
                     for idx_fallback, text in enumerate(raw_comments, start=1):
                         normalized = clean_text(text)
-                        if not is_meaningful_comment(normalized) or normalized in seen:
+                        if not normalized or normalized in seen:
                             continue
                         seen.add(normalized)
                         comment_rows.append(

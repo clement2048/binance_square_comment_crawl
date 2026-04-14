@@ -149,6 +149,145 @@ def extract_from_meta_tags(html_content: str) -> Dict[str, str]:
     return meta_info
 
 
+def normalize_product_symbol(raw: str) -> str:
+    """规范化币种符号，返回空字符串表示无效。"""
+    symbol = (raw or "").strip().upper().replace("$", "")
+    symbol = re.sub(r"[^A-Z0-9]", "", symbol)
+    if re.fullmatch(r"[A-Z][A-Z0-9]{1,9}", symbol):
+        return symbol
+    return ""
+
+
+def to_base_symbol(symbol: str) -> str:
+    """将交易对归一化为基础币种（如 RAVEUSDT -> RAVE）。"""
+    normalized = normalize_product_symbol(symbol)
+    if not normalized:
+        return ""
+
+    quote_suffixes = [
+        "USDT",
+        "USDC",
+        "FDUSD",
+        "BUSD",
+        "TUSD",
+        "USDP",
+        "DAI",
+        "TRY",
+        "EUR",
+        "BRL",
+        "RUB",
+        "UAH",
+        "BIDR",
+    ]
+    for suffix in quote_suffixes:
+        if normalized.endswith(suffix) and len(normalized) > len(suffix) + 1:
+            candidate = normalized[: -len(suffix)]
+            candidate = normalize_product_symbol(candidate)
+            if candidate:
+                return candidate
+
+    return normalized
+
+
+def extract_products_from_post_data(post_data: Dict[str, Any]) -> List[str]:
+    """仅从当前帖子对象中提取币种候选。"""
+    products: List[str] = []
+    seen: set[str] = set()
+
+    def add_product(raw: Any) -> None:
+        if not isinstance(raw, str):
+            return
+        symbol = to_base_symbol(raw)
+        if symbol and symbol not in seen:
+            seen.add(symbol)
+            products.append(symbol)
+
+    def walk(data: Any, depth: int = 0) -> None:
+        if depth > 8:
+            return
+
+        if isinstance(data, dict):
+            symbol_keys = {
+                "symbol",
+                "symbols",
+                "relatedSymbol",
+                "relatedSymbols",
+                "coin",
+                "coins",
+                "tag",
+                "tags",
+                "keyword",
+                "keywords",
+                "product",
+                "products",
+            }
+
+            for key, value in data.items():
+                if key in symbol_keys:
+                    if isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, dict):
+                                add_product(item.get("symbol") or item.get("code") or item.get("name") or "")
+                            else:
+                                add_product(str(item))
+                    elif isinstance(value, dict):
+                        add_product(value.get("symbol") or value.get("code") or value.get("name") or "")
+                    elif isinstance(value, str):
+                        # 支持逗号分隔关键词
+                        for token in re.split(r"[,|/\s]+", value):
+                            add_product(token)
+
+                # 限制在当前帖子对象内递归，不再扫描整份APP_DATA。
+                walk(value, depth + 1)
+
+        elif isinstance(data, list):
+            for item in data:
+                walk(item, depth + 1)
+
+    walk(post_data)
+    return products
+
+
+def extract_products_from_html(
+    html_content: str,
+    post_id: str,
+    post_content: str,
+    post_data: Dict[str, Any],
+) -> List[str]:
+    """从当前帖子范围提取币种，避免全页噪音。"""
+    products: List[str] = []
+    seen: set[str] = set()
+
+    def add_product(raw: Any) -> None:
+        if not isinstance(raw, str):
+            return
+        symbol = to_base_symbol(raw)
+        if symbol and symbol not in seen:
+            seen.add(symbol)
+            products.append(symbol)
+
+    # 1) 当前帖对象内的符号字段（优先）
+    for token in extract_products_from_post_data(post_data):
+        add_product(token)
+
+    # 2) 当前帖正文中的 $SYMBOL
+    for symbol in re.findall(r"\$([A-Za-z][A-Za-z0-9]{1,14})\b", post_content):
+        add_product(symbol)
+
+    # 3) 当前帖片段中的交易链接（通过 contentId 锚定当前帖子）
+    link_pattern = rf'href=["\'][^"\']*/(?:futures|trade|price)/([^"\'/?#]+)\?[^"\']*contentId={re.escape(post_id)}[^"\']*["\']'
+    for slug in re.findall(link_pattern, html_content, re.IGNORECASE):
+        add_product(slug)
+
+    # 4) 兜底：若仍为空，再从与当前帖子关联的 symbol span 抽取
+    if not products:
+        span_pattern = rf'contentId={re.escape(post_id)}[\s\S]{{0,400}}?<span[^>]*class="symbol"[^>]*>([^<]+)</span>'
+        for symbol_text in re.findall(span_pattern, html_content, re.IGNORECASE):
+            add_product(symbol_text)
+
+    return products
+
+
 def find_post_data_in_app_data(app_data: Dict[str, Any], post_id: str) -> Dict[str, Any]:
     """在APP_DATA中查找帖子数据"""
     result = {}
@@ -500,10 +639,18 @@ def parse_html_file(html_file: Path) -> Dict[str, Any]:
             parse_datetime(post_data.get("createTime")) or      # APP_DATA中的创建时间
             ""
         )
+
+        product = extract_products_from_html(
+            html_content=content,
+            post_id=post_id,
+            post_content=post_content,
+            post_data=post_data,
+        )
         
         result = {
             "source_file": str(html_file),
             "post_id": post_id,
+            "product": product,
             "post_author": post_author,
             "post_content": post_content,
             "post_time": post_time,
@@ -527,6 +674,7 @@ def parse_html_file(html_file: Path) -> Dict[str, Any]:
         return {
             "source_file": str(html_file),
             "post_id": html_file.stem,
+            "product": [],
             "post_author": "",
             "post_content": "",
             "post_time": "",
