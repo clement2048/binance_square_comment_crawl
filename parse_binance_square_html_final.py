@@ -40,9 +40,69 @@ def extract_app_data(html_content: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def extract_json_ld_data(html_content: str) -> Dict[str, Any]:
+    """提取JSON-LD结构化数据（schema.org）"""
+    ld_data = {}
+    
+    # 查找JSON-LD脚本
+    pattern = r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>'
+    matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
+    
+    for json_ld_str in matches:
+        try:
+            data = json.loads(json_ld_str.strip())
+            if isinstance(data, dict):
+                # 检查是否是DiscussionForumPosting类型
+                if data.get("@type") == "DiscussionForumPosting":
+                    # 提取关键信息
+                    if "headline" in data:
+                        ld_data["headline"] = html.unescape(data["headline"])
+                    if "text" in data:
+                        ld_data["full_text"] = html.unescape(data["text"])
+                    if "datePublished" in data:
+                        ld_data["date_published"] = data["datePublished"]
+                    if "url" in data:
+                        ld_data["url"] = data["url"]
+                    
+                    # 提取作者信息
+                    if "author" in data and isinstance(data["author"], dict):
+                        author = data["author"]
+                        if "name" in author:
+                            ld_data["author_name"] = html.unescape(author["name"])
+                        if "url" in author:
+                            ld_data["author_url"] = author["url"]
+                    
+                    # 提取互动统计
+                    if "interactionStatistic" in data and isinstance(data["interactionStatistic"], dict):
+                        interaction = data["interactionStatistic"]
+                        if "userInteractionCount" in interaction:
+                            ld_data["like_count"] = interaction["userInteractionCount"]
+        
+        except json.JSONDecodeError:
+            continue
+    
+    return ld_data
+
+
 def extract_from_meta_tags(html_content: str) -> Dict[str, str]:
     """从HTML meta标签提取信息"""
     meta_info = {}
+    
+    # 首先提取JSON-LD结构化数据（优先级更高）
+    ld_data = extract_json_ld_data(html_content)
+    
+    # 优先使用JSON-LD数据
+    if "headline" in ld_data:
+        meta_info["title"] = ld_data["headline"]
+    if "full_text" in ld_data:
+        # 优先使用完整文本，如果JSON-LD中没有完整文本，则尝试合并其他来源
+        meta_info["full_content"] = ld_data["full_text"]
+    if "author_name" in ld_data:
+        meta_info["author"] = ld_data["author_name"]
+    if "date_published" in ld_data:
+        meta_info["published_date"] = ld_data["date_published"]
+    if "like_count" in ld_data:
+        meta_info["likes"] = str(ld_data["like_count"])
     
     # 提取OG标签
     og_patterns = {
@@ -54,7 +114,9 @@ def extract_from_meta_tags(html_content: str) -> Dict[str, str]:
     for key, pattern in og_patterns.items():
         match = re.search(pattern, html_content, re.IGNORECASE)
         if match:
-            meta_info[key] = html.unescape(match.group(1)).strip()
+            # 如果JSON-LD中已有数据，则不要覆盖
+            if key not in meta_info:
+                meta_info[key] = html.unescape(match.group(1)).strip()
     
     # 从title标签提取标题
     if "title" not in meta_info:
@@ -62,18 +124,27 @@ def extract_from_meta_tags(html_content: str) -> Dict[str, str]:
         if title_match:
             meta_info["title"] = html.unescape(title_match.group(1)).split("|")[0].strip()
     
-    # 尝试从页面内容提取作者和时间
-    author_patterns = [
-        r'<meta[^>]*name=["\']author["\'][^>]*content=["\']([^"\']*)["\'][^>]*>',
-        r'<div[^>]*class=[^>]*author[^>]*>([^<]+)</div>',
-        r'<span[^>]*class=[^>]*author[^>]*>([^<]+)</span>',
-    ]
+    # 如果JSON-LD中没有作者，尝试从页面内容提取作者和时间
+    if "author" not in meta_info:
+        author_patterns = [
+            r'<meta[^>]*name=["\']author["\'][^>]*content=["\']([^"\']*)["\'][^>]*>',
+            r'<div[^>]*class=[^>]*author[^>]*>([^<]+)</div>',
+            r'<span[^>]*class=[^>]*author[^>]*>([^<]+)</span>',
+        ]
+        
+        for pattern in author_patterns:
+            match = re.search(pattern, html_content, re.IGNORECASE)
+            if match:
+                meta_info["author"] = html.unescape(match.group(1)).strip()
+                break
     
-    for pattern in author_patterns:
-        match = re.search(pattern, html_content, re.IGNORECASE)
-        if match:
-            meta_info["author"] = html.unescape(match.group(1)).strip()
-            break
+    # 生成完整的帖子内容
+    # 优先使用JSON-LD的完整文本，否则使用headline + description的组合
+    if "full_content" in meta_info:
+        meta_info["description"] = meta_info["full_content"]
+    elif "title" in meta_info and "description" in meta_info:
+        # 合并标题和描述
+        meta_info["description"] = f"{meta_info['title']}\n\n{meta_info['description']}"
     
     return meta_info
 
@@ -184,105 +255,192 @@ def find_comments_in_app_data(app_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return comments
 
 
-def extract_comments_from_dom(html_content: str) -> List[Dict[str, str]]:
-    """从DOM中提取评论数据（备用方法）"""
-    comments = []
-    
-    # 搜索评论相关文本
-    # 常见评论类名和数据属性
-    comment_selectors = [
-        r'<div[^>]*class=[^>]*comment-item[^>]*>.*?</div>',
-        r'<div[^>]*class=[^>]*comment[^>]*>.*?</div>',
-        r'<div[^>]*data-testid=[^>]*comment[^>]*>.*?</div>',
-        r'<div[^>]*role=["\']comment["\'][^>]*>.*?</div>',
-    ]
-    
-    for pattern in comment_selectors:
-        matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
-        if matches:
-            for i, match in enumerate(matches[:50]):  # 限制数量
-                # 提取文本
-                text = re.sub(r'<[^>]+>', ' ', match)
-                text = re.sub(r'\s+', ' ', text).strip()
-                
-                if 10 < len(text) < 500:  # 合理长度
-                    # 尝试提取作者
-                    author = ""
-                    author_patterns = [
-                        r'<[^>]*class=[^>]*author[^>]*>([^<]+)</',
-                        r'<[^>]*class=[^>]*nickname[^>]*>([^<]+)</',
-                        r'<[^>]*class=[^>]*username[^>]*>([^<]+)</',
-                    ]
-                    
-                    for author_pattern in author_patterns:
-                        author_match = re.search(author_pattern, match, re.IGNORECASE)
-                        if author_match:
-                            author = html.unescape(author_match.group(1)).strip()
-                            break
-                    
-                    comments.append({
-                        "comment_id": f"dom_{i}",
-                        "author": author,
-                        "text": text,
-                        "time": "",
-                    })
-    
+def extract_comments_from_dom(html_content: str) -> List[Dict[str, Any]]:
+    """从DOM中提取评论数据（按评论卡片顺序，确定性提取）"""
+    comments: List[Dict[str, Any]] = []
+
+    card_pattern = re.compile(
+        r'<div[^>]*data-id="([^"]+)"[^>]*class="([^"]*FeedBuzzBaseViewRoot[^"]*)"[^>]*>',
+        re.DOTALL,
+    )
+    card_matches = list(card_pattern.finditer(html_content))
+    if not card_matches:
+        print("  DOM中未找到评论卡片")
+        return comments
+
+    print(f"  DOM中找到 {len(card_matches)} 个评论卡片")
+
+    for i, match in enumerate(card_matches):
+        original_comment_id = match.group(1).strip()
+        class_attr = match.group(2)
+
+        start = match.end()
+        end = card_matches[i + 1].start() if i + 1 < len(card_matches) else len(html_content)
+        segment = html_content[start:end]
+
+        author = ""
+        time_text = ""
+        text = ""
+
+        author_match = re.search(
+            r'<div[^>]*class="nick-username"[^>]*>[\s\S]*?<a[^>]*class="nick[^"]*"[^>]*>([^<]+)</a>',
+            segment,
+            re.DOTALL,
+        )
+        if author_match:
+            author = html.unescape(author_match.group(1)).strip()
+
+        time_match = re.search(
+            r'<div[^>]*class="create-time"[^>]*>([^<]+)</div>',
+            segment,
+            re.DOTALL,
+        )
+        if time_match:
+            time_text = html.unescape(time_match.group(1)).strip()
+
+        content_match = re.search(
+            rf'<div[^>]*class="[^"]*feed-content-text[^"]*"[^>]*data="{re.escape(original_comment_id)}"[^>]*>[\s\S]*?<div[^>]*class="card__description rich-text"[^>]*>([\s\S]*?)</div>',
+            segment,
+            re.DOTALL,
+        )
+        if not content_match:
+            content_match = re.search(
+                r'<div[^>]*class="card__description rich-text"[^>]*>([\s\S]*?)</div>',
+                segment,
+                re.DOTALL,
+            )
+
+        if content_match:
+            text = html.unescape(content_match.group(1))
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+
+        if not text:
+            continue
+
+        comment = {
+            "comment_id": original_comment_id,
+            "original_comment_id": original_comment_id,
+            "author": author,
+            "text": text,
+            "time": time_text,
+            "parent_comment_id": None,
+            "is_thread_card": "in-thread-card" in class_attr,
+            "is_thread_first": "in-thread-card-first" in class_attr,
+            "is_thread_last": "in-thread-card-last" in class_attr,
+            "replies": [],
+        }
+        comments.append(comment)
+
+    print(f"  DOM提取到 {len(comments)} 条有效评论")
     return comments
 
 
-def timestamp_to_readable(timestamp: Any) -> str:
-    """转换时间戳为可读格式"""
-    if not timestamp:
+def parse_datetime(datetime_str: Any) -> str:
+    """解析时间字符串为可读格式"""
+    if not datetime_str:
         return ""
     
     try:
-        ts_str = str(timestamp)
-        if not ts_str.isdigit() or ts_str == "0":
-            return ""
+        dt_str = str(datetime_str).strip()
         
-        ts_int = int(ts_str)
-        if ts_int > 10**12:  # 毫秒级
-            dt = datetime.fromtimestamp(ts_int / 1000)
-        else:  # 秒级
-            dt = datetime.fromtimestamp(ts_int)
+        # 如果是时间戳（数字）
+        if dt_str.isdigit():
+            ts_int = int(dt_str)
+            if ts_int == 0:
+                return ""
+            elif ts_int > 10**12:  # 毫秒级
+                dt = datetime.fromtimestamp(ts_int / 1000)
+            else:  # 秒级
+                dt = datetime.fromtimestamp(ts_int)
+        else:
+            # 尝试解析ISO 8601格式（如：2026-04-11T10:25:46.000Z）
+            # 移除毫秒和时区信息
+            cleaned_dt = re.sub(r'\.\d+', '', dt_str)  # 移除毫秒
+            cleaned_dt = cleaned_dt.replace('Z', '')  # 移除Z时区标记
+            dt = datetime.fromisoformat(cleaned_dt)
         
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
-        return str(timestamp)
+        # 如果无法解析，返回原始字符串
+        return str(datetime_str)
 
 
 def build_comment_tree(flat_comments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """构建评论树形结构"""
-    comment_map = {}
+    """构建评论树形结构（优先使用线程标记；无标记时按parent_comment_id）"""
+    if not flat_comments:
+        return []
+
+    for comment in flat_comments:
+        comment["replies"] = []
+
+    has_thread_marker = any("is_thread_card" in c for c in flat_comments)
+    if has_thread_marker:
+        root_comments: List[Dict[str, Any]] = []
+        current_thread_root: Optional[Dict[str, Any]] = None
+
+        for comment in flat_comments:
+            is_first = bool(comment.get("is_thread_first"))
+            is_last = bool(comment.get("is_thread_last"))
+            is_thread = bool(comment.get("is_thread_card"))
+
+            if is_first:
+                comment["parent_comment_id"] = None
+                root_comments.append(comment)
+                current_thread_root = comment
+                if is_last:
+                    current_thread_root = None
+                continue
+
+            if is_thread and current_thread_root is not None:
+                comment["parent_comment_id"] = current_thread_root.get("original_comment_id") or current_thread_root.get("comment_id")
+                current_thread_root["replies"].append(comment)
+                if is_last:
+                    current_thread_root = None
+                continue
+
+            comment["parent_comment_id"] = None
+            root_comments.append(comment)
+            if not is_thread:
+                current_thread_root = None
+
+        return root_comments
+
+    # APP_DATA等来源没有线程标记时，使用显式parent_comment_id构树
+    comment_map: Dict[str, Dict[str, Any]] = {}
     root_comments = []
-    
-    # 第一次遍历：建立ID映射
+
     for comment in flat_comments:
-        comment_id = comment.get("comment_id")
-        if comment_id:
-            comment["replies"] = []
-            comment_map[comment_id] = comment
-    
-    # 第二次遍历：建立父子关系
+        node_id = str(comment.get("comment_id") or comment.get("original_comment_id") or "")
+        if node_id:
+            comment_map[node_id] = comment
+
     for comment in flat_comments:
-        parent_id = comment.get("parent_comment_id")
+        parent_id = str(comment.get("parent_comment_id") or "")
         if parent_id and parent_id in comment_map:
-            # 这是回复
             comment_map[parent_id]["replies"].append(comment)
         else:
-            # 这是根评论
             root_comments.append(comment)
-    
+
     return root_comments
 
 
-def format_comment_for_output(comment: Dict[str, Any], idx: int) -> Dict[str, Any]:
+def format_comment_for_output(comment: Dict[str, Any], id_counter: Dict[str, int]) -> Dict[str, Any]:
     """格式化评论为输出格式"""
+    comment_id = f"c{id_counter['value']}"
+    id_counter["value"] += 1
+    author = comment.get("author", "")
+    text = comment.get("text", "")
+    post_time = comment.get("time", "")
+    original_comment_id = str(comment.get("original_comment_id") or comment.get("comment_id") or "")
+    
     return {
-        "comment_id": comment.get("comment_id") or f"c{idx}",
-        "author": comment.get("author", ""),
-        "text": comment.get("text", ""),
-        "replies": [format_comment_for_output(reply, i) for i, reply in enumerate(comment.get("replies", []))]
+        "comment_id": comment_id,
+        "original_comment_id": original_comment_id,
+        "author": author,
+        "text": text,
+        "post_time": post_time,
+        "replies": [format_comment_for_output(reply, id_counter) for reply in comment.get("replies", [])]
     }
 
 
@@ -310,26 +468,53 @@ def parse_html_file(html_file: Path) -> Dict[str, Any]:
         
         # 获取评论数据
         comments = []
-        if app_data:
+        # 优先从DOM提取（更准确，有作者和时间）
+        comments = extract_comments_from_dom(content)
+        
+        # 如果DOM中没提取到评论，再尝试从APP_DATA提取
+        if not comments and app_data:
+            print(f"  从APP_DATA提取评论...")
             comments = find_comments_in_app_data(app_data)
         
-        # 如果APP_DATA中没有评论，尝试从DOM提取
-        if not comments:
-            comments = extract_comments_from_dom(content)
+        print(f"  总共提取到 {len(comments)} 条评论")
         
         # 构建评论树
         comment_tree = build_comment_tree(comments)
         
         # 构建最终结果
+        # 优先使用JSON-LD中的数据
+        post_author = (
+            meta_info.get("author") or  # JSON-LD中的作者
+            post_data.get("author") or  # APP_DATA中的作者
+            ""
+        )
+        
+        post_content = (
+            meta_info.get("description") or  # JSON-LD中的完整文本
+            post_data.get("content") or      # APP_DATA中的内容
+            ""
+        )
+        
+        post_time = (
+            parse_datetime(meta_info.get("published_date")) or  # JSON-LD中的发布时间
+            parse_datetime(post_data.get("createTime")) or      # APP_DATA中的创建时间
+            ""
+        )
+        
         result = {
             "source_file": str(html_file),
             "post_id": post_id,
-            "post_author": post_data.get("author") or meta_info.get("author", ""),
-            "post_content": post_data.get("content") or meta_info.get("description", ""),
-            "post_time": timestamp_to_readable(post_data.get("createTime")),
-            "post_text": post_data.get("content") or meta_info.get("description", ""),
-            "comments": [format_comment_for_output(comment, i) for i, comment in enumerate(comment_tree)]
+            "post_author": post_author,
+            "post_content": post_content,
+            "post_time": post_time,
+            "comments": []
         }
+
+        id_counter = {"value": 1}
+        result["comments"] = [
+            format_comment_for_output(comment, id_counter)
+            for comment in comment_tree
+        ]
         
         return result
         
@@ -345,7 +530,6 @@ def parse_html_file(html_file: Path) -> Dict[str, Any]:
             "post_author": "",
             "post_content": "",
             "post_time": "",
-            "post_text": "",
             "comments": [],
             "error": str(e)
         }
