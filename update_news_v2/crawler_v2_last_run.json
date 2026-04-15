@@ -1,0 +1,14 @@
+{
+  "started_at": "2026-04-15 09:19:37",
+  "ended_at": "2026-04-15 09:19:45",
+  "target_posts": 30,
+  "existing_before": 0,
+  "new_added": 20,
+  "total_posts_after": 20,
+  "rounds_done": 3,
+  "stop_reason": "idle_stop_reached",
+  "db_path": "update_news_v2\\square_posts_v2.db",
+  "exported_rows": 20,
+  "csv": "update_news_v2\\binance_square_posts.csv",
+  "raw_json": "update_news_v2\\binance_square_posts_raw.json"
+}

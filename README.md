@@ -1,16 +1,19 @@
 # Binance Square 抓取与 HTML 解析
 
-本项目当前推荐流程为两步：
+当前推荐流程（大规模场景）为三步：
 
-1. 先抓取页面并保存帖子详情 HTML（可选同时抓评论调试信息）
-2. 再离线解析 HTML，生成结构化 JSON
+1. 用 `crawler_v2.py` 增量采集帖子链接到 SQLite（可断点续跑）
+2. 用 `fetch_pages_from_db.py` 从 DB 批量下载帖子 HTML
+3. 用 `parse_binance_square_html_final.py` 离线解析 HTML，生成结构化 JSON
 
 不包含 TXT 解析工作流。
 
 ## 项目脚本
 
-- 主抓取脚本：binance_square_crawler.py
-- HTML 解析脚本：parse_binance_square_html_final.py
+- 增量采集器（推荐）：`crawler_v2.py`
+- DB 转 HTML 下载器：`fetch_pages_from_db.py`
+- HTML 解析器：`parse_binance_square_html_final.py`
+- 旧版一体脚本（小规模可用）：`binance_square_crawler.py`
 
 ## 环境准备
 
@@ -21,124 +24,111 @@ pip install requests playwright
 playwright install chromium
 ```
 
-## 主流程命令
+## 推荐主流程（v2）
 
-### 1) 抓取页面（推荐）
+### 1) 增量采集帖子到 SQLite
 
 ```bash
-python binance_square_crawler.py --source square-home --max-posts 20 --wait-for-login --dump-page
+python crawler_v2.py --lang en --target-posts 5000 --max-scroll-rounds 20000 --idle-stop-rounds 200 --wait-for-login --output-dir update_news_v2
 ```
 
 说明：
-- 先打开 Binance Square 首页采集帖子链接
-- 进入帖子页并保存页面 dump（HTML + 截图）
-- 如未加 --skip-comments，会尝试抓评论（仅内存统计，不导出评论 CSV）
+- 这是“目标驱动 + 持久化去重”模式，适合 5000/100000 这类大规模场景。
+- 结果会持续累积到 `update_news_v2/square_posts_v2.db`。
+- 再次运行同命令会在已有基础上继续采集（不会从零开始）。
 
-### 2) 批量解析 HTML
-
-```bash
-python parse_binance_square_html_final.py --input update_news/binance_square_page_dump --output update_news/parsed_from_html/binance_square_html_parsed.json --batch
-```
-
-## 英文页面抓取示例
+### 2) 从 DB 批量下载 HTML
 
 ```bash
-python binance_square_crawler.py --source square-home --lang en --skip-comments --dump-page --wait-for-login
+python fetch_pages_from_db.py --db-path update_news_v2/square_posts_v2.db --output-dir update_news/binance_square_page_dump --limit 200 --headless
 ```
 
-## 连通性检查命令
+常用变体：
 
-### square-home 检查（浏览器链路）
+```bash
+# 覆盖已存在 HTML
+python fetch_pages_from_db.py --db-path update_news_v2/square_posts_v2.db --output-dir update_news/binance_square_page_dump --limit 200 --headless --overwrite
+
+# 分批拉取（例如第 201~400 条）
+python fetch_pages_from_db.py --db-path update_news_v2/square_posts_v2.db --output-dir update_news/binance_square_page_dump --offset 200 --limit 200 --headless
+```
+
+说明：
+- 默认会跳过已存在 HTML 文件（日志中的 `skipped` 是正常行为）。
+- 默认只保存 HTML，较省空间；可选 `--save-screenshot` 保存截图。
+
+### 3) 批量解析 HTML
+
+```bash
+python parse_binance_square_html_final.py --batch --input update_news/binance_square_page_dump --output update_news/parsed_from_html/binance_square_html_parsed.json
+```
+
+## 解析器输出字段说明（重要）
+
+`parse_binance_square_html_final.py` 当前会输出：
+
+- `post_id`
+- `post_author`
+- `post_content`
+- `post_time`
+- `product`
+- `comments`
+
+其中 `product` 规则：
+
+- 按“当前帖子范围”提取，不再扫描整页噪音
+- 交易对会归一为基础币种（如 `RAVEUSDT -> RAVE`）
+- 输出为数组，如：`["RAVE"]`
+
+## 连通性检查
+
+### crawler_v2 浏览器链路检查
+
+```bash
+python crawler_v2.py --check-only --lang en
+```
+
+### DB->HTML 下载链路检查
+
+```bash
+python fetch_pages_from_db.py --check-only --db-path update_news_v2/square_posts_v2.db --output-dir update_news/binance_square_page_dump --headless
+```
+
+### 旧版脚本检查（可选）
 
 ```bash
 python binance_square_crawler.py --source square-home --check-only
 ```
 
-### news 检查（可选代理环境变量）
+## 输出目录（v2）
 
-```bash
-python binance_square_crawler.py --source news --check-only --trust-env-proxy
-```
+### crawler_v2 输出
 
-说明：--trust-env-proxy 仅在依赖系统代理环境变量访问网络时使用。
+- `update_news_v2/square_posts_v2.db`（去重主库）
+- `update_news_v2/binance_square_posts.csv`（快照导出）
+- `update_news_v2/binance_square_posts_raw.json`（快照导出）
+- `update_news_v2/crawler_v2_last_run.json`（最近一次运行摘要）
 
-## HTML 解析命令
+### fetch_pages_from_db 输出
 
-### 解析单个 HTML 文件
+- `update_news/binance_square_page_dump/*.html`
+- `update_news/binance_square_page_dump/fetch_pages_from_db_summary.json`
+- `update_news/binance_square_page_dump/fetch_pages_from_db_failures.json`（仅失败时生成）
 
-```bash
-python parse_binance_square_html_final.py --input update_news/binance_square_page_dump/你的帖子文件.html --output update_news/parsed_from_html/single_post.json
-```
+### parse 输出
 
-### 批量解析目录
-
-```bash
-python parse_binance_square_html_final.py --input update_news/binance_square_page_dump --output update_news/parsed_from_html/binance_square_html_parsed.json --batch
-```
-
-## 关键参数（精简）
-
-### binance_square_crawler.py
-
-- --source
-  - news 或 square-home（当前主流程推荐 square-home）
-- --max-posts
-  - 最多处理帖子数
-- --max-comments
-  - 每帖最多抓取评论数
-- --wait-for-login
-  - 打开页面后等待手动登录再继续
-- --dump-page
-  - 保存帖子页 dump（当前流程使用 HTML + 截图）
-- --skip-comments
-  - 跳过评论抓取
-- --lang
-  - 页面语言，如 zh-CN、en
-- --check-only
-  - 只做连通性/可运行性检查，不写抓取结果
-- --trust-env-proxy
-  - 允许读取系统代理环境变量（按需）
-- --save-comment-debug
-  - 保存评论相关接口响应调试文件
-
-### parse_binance_square_html_final.py
-
-- --input
-  - 单个 HTML 文件或目录（默认 update_news/binance_square_page_dump）
-- --output
-  - 输出 JSON 文件路径（默认 update_news/parsed_from_html/binance_square_html_parsed.json）
-- --batch
-  - 按目录批量处理
-
-## 输出说明（当前准确状态）
-
-### 爬虫输出
-
-- update_news/binance_square_posts.csv（帖子汇总 CSV）
-- update_news/binance_square_posts_raw.json（帖子原始/标准化 JSON）
-- update_news/binance_square_page_dump/（页面 dump 目录，当前流程使用 HTML + 截图）
-- update_news/binance_square_comment_debug/（仅在 --save-comment-debug 时生成）
-
-### HTML 解析输出
-
-- update_news/parsed_from_html/binance_square_html_parsed.json（批量解析默认输出）
-- 或通过 --output 指定的任意 JSON 文件
-
-补充：
-- 抓取脚本当前已移除评论 CSV 与 merged CSV 导出
-- 运行结束会打印评论抓取条数，但不会写 comments.csv 或 merged CSV
+- `update_news/parsed_from_html/binance_square_html_parsed.json`
 
 ## 已知限制
 
-- square-home 依赖页面结构与滚动加载，页面改版可能影响帖子链接采集
-- 评论抓取受登录状态、页面展开状态、动态加载时机影响，完整性不保证
-- HTML 解析依赖 DOM 与页面内嵌数据，若页面内容缺失或脚本数据变化，字段可能为空
-- news 模式连通性受网络与地区限制影响，必要时使用 --trust-env-proxy
+- `square-home` 是动态推荐流，不是稳定分页，无法保证“单次运行精确命中 N 条新增”。
+- 大规模采集建议多次运行累积到目标值（`target-posts`）。
+- 评论区展开受登录态、页面渲染与动态加载影响，完整性仍可能波动。
+- HTML 解析依赖页面结构与内嵌数据，页面改版可能需要更新规则。
 
 ## 建议实践
 
-如果你的目标是稳定离线分析，建议优先使用：
-
-1. square-home 抓取 + --wait-for-login
-2. --dump-page --skip-comments
-3. 先用单文件测试 parse_binance_square_html_final.py，再做目录批量解析
+1. 先用 `crawler_v2.py` 累积索引，再分批下载 HTML，再离线解析。
+2. 大批量下载建议使用 `--offset + --limit` 分批执行，便于失败重试。
+3. 若空间紧张，优先只存 HTML，不保存截图。
+4. 解析前先抽样检查 5-10 个 HTML 的页面完整性。
