@@ -18,12 +18,13 @@ except ImportError:  # pragma: no cover
     sync_playwright = None
 
 
-DEFAULT_OUTPUT_DIR = Path("update_news_v2")
-DEFAULT_USER_DATA_DIR = Path("tmp_chrome_profile")
-DEFAULT_DB_NAME = "square_posts_v2.db"
+DEFAULT_OUTPUT_DIR = Path("update_news_v2")         # 输出目录，包含SQLite数据库和导出的CSV/JSON文件
+DEFAULT_USER_DATA_DIR = Path("tmp_chrome_profile")  # 用于持久化登录状态的Chromium用户数据目录
+DEFAULT_DB_NAME = "square_posts_v2.db"              # SQLite数据库文件名
 SQUARE_HOME_URL_TEMPLATE = "https://www.binance.com/{lang}/square"
 
 
+# 解析命令行参数，支持配置爬虫行为和输出选项
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -75,6 +76,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# 获取当前时间的文本表示
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -98,12 +100,14 @@ def post_id_from_url(url: str) -> str:
     return path.split("/")[-1] if path else ""
 
 
+# 创建Playwright浏览器上下文，支持持久化用户数据目录以保持登录状态
 def create_browser_context(headless: bool, user_data_dir: str) -> tuple[Any, Any]:
     if sync_playwright is None:
         raise RuntimeError(
             "playwright is not installed. Run: pip install playwright && playwright install chromium"
         )
 
+    # 优先使用持久化上下文，保持登录状态；如果未指定，则使用无状态上下文
     playwright = sync_playwright().start()
     if user_data_dir:
         print(f"[browser] using persistent profile: {user_data_dir}")
@@ -127,6 +131,8 @@ def safe_close_browser(playwright_obj: Any, context: Any) -> None:
         playwright_obj.stop()
 
 
+# 创建一个新的SQLite数据库连接，并初始化post表结构，用来存储爬取到的帖子数据和爬虫运行日志
+# 关键参数：post_id（从帖子URL中提取的唯一ID），link（帖子URL），first_seen_at（首次发现时间），last_seen_at（最后一次发现时间），seen_count（被发现的次数）
 def init_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -139,6 +145,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # runs表用来记录每次爬虫运行的元数据和统计信息，便于分析和调试
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS runs (
@@ -156,6 +163,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # 创建索引
+    # TODO: 为什么这里是这两个索引？需要分析一下
     conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_first_seen ON posts(first_seen_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_last_seen ON posts(last_seen_at)")
     conn.commit()
@@ -197,6 +206,7 @@ def insert_or_touch_posts(conn: sqlite3.Connection, urls: list[str], seen_at: st
     return new_count
 
 
+# 获取页面上可见的帖子URL列表
 def fetch_visible_post_urls(page: Any) -> list[str]:
     try:
         hrefs = page.locator("a[href*='/square/post/']").evaluate_all(

@@ -13,7 +13,6 @@
 - 增量采集器（推荐）：`crawler_v2.py`
 - DB 转 HTML 下载器：`fetch_pages_from_db.py`
 - HTML 解析器：`parse_binance_square_html_final.py`
-- 旧版一体脚本（小规模可用）：`binance_square_crawler.py`
 
 ## 环境准备
 
@@ -26,7 +25,7 @@ playwright install chromium
 
 ## 推荐主流程（v2）
 
-### 1) 增量采集帖子到 SQLite
+### 1) 增量采集帖子到 SQLite(以5000条为例)
 
 ```bash
 python crawler_v2.py --lang en --target-posts 5000 --max-scroll-rounds 20000 --idle-stop-rounds 200 --wait-for-login --output-dir update_news_v2
@@ -67,12 +66,12 @@ python parse_binance_square_html_final.py --batch --input update_news/binance_sq
 
 `parse_binance_square_html_final.py` 当前会输出：
 
-- `post_id`
-- `post_author`
-- `post_content`
-- `post_time`
-- `product`
-- `comments`
+- `post_id`：帖子的html的id
+- `post_author`：帖子作者
+- `post_content`：帖子评论内容
+- `post_time`：帖子时间
+- `product`：与该贴相关铲平
+- `comments`：帖子下方的评论
 
 其中 `product` 规则：
 
@@ -94,18 +93,11 @@ python crawler_v2.py --check-only --lang en
 python fetch_pages_from_db.py --check-only --db-path update_news_v2/square_posts_v2.db --output-dir update_news/binance_square_page_dump --headless
 ```
 
-### 旧版脚本检查（可选）
-
-```bash
-python binance_square_crawler.py --source square-home --check-only
-```
-
 ## 输出目录（v2）
 
 ### crawler_v2 输出
 
 - `update_news_v2/square_posts_v2.db`（去重主库）
-- `update_news_v2/binance_square_posts.csv`（快照导出）
 - `update_news_v2/binance_square_posts_raw.json`（快照导出）
 - `update_news_v2/crawler_v2_last_run.json`（最近一次运行摘要）
 

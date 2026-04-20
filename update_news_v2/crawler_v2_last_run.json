@@ -1,14 +1,14 @@
 {
-  "started_at": "2026-04-15 09:19:37",
-  "ended_at": "2026-04-15 09:19:45",
-  "target_posts": 30,
-  "existing_before": 0,
-  "new_added": 20,
-  "total_posts_after": 20,
-  "rounds_done": 3,
-  "stop_reason": "idle_stop_reached",
+  "started_at": "2026-04-20 16:23:38",
+  "ended_at": "2026-04-20 16:23:38",
+  "target_posts": 5000,
+  "existing_before": 10009,
+  "new_added": 0,
+  "total_posts_after": 10009,
+  "rounds_done": 0,
+  "stop_reason": "target_already_reached",
   "db_path": "update_news_v2\\square_posts_v2.db",
-  "exported_rows": 20,
+  "exported_rows": 10009,
   "csv": "update_news_v2\\binance_square_posts.csv",
   "raw_json": "update_news_v2\\binance_square_posts_raw.json"
 }
