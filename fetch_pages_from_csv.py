@@ -18,22 +18,22 @@ except ImportError:  # pragma: no cover
     sync_playwright = None
 
 
-DEFAULT_DB_PATH = Path("update_news_v2/square_posts_v2.db")
-DEFAULT_OUTPUT_DIR = Path("update_news/binance_square_page_dump")
+DEFAULT_CSV_PATH = Path("master_news_dataset.csv")
+DEFAULT_OUTPUT_DIR = Path("update_news/csv_news_page_dump")
 DEFAULT_USER_DATA_DIR = Path("tmp_chrome_profile")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Download post HTML pages from crawler_v2 SQLite DB. "
+            "Download post HTML pages from csv. "
             "Default output is HTML-only to save disk space."
         )
     )
     parser.add_argument(
-        "--db-path",
-        default=str(DEFAULT_DB_PATH),
-        help=f"SQLite file path, default: {DEFAULT_DB_PATH}",
+        "--csv-path",
+        default=str(DEFAULT_CSV_PATH),
+        help=f"CSV file path, default: {DEFAULT_CSV_PATH}",
     )
     parser.add_argument(
         "--output-dir",
@@ -378,42 +378,51 @@ def safe_close_browser(playwright_obj: Any, context: Any) -> None:
         playwright_obj.stop()
 
 
-def load_posts(db_path: Path, limit: int, offset: int) -> list[dict[str, str]]:
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        query = "SELECT post_id, link FROM posts ORDER BY first_seen_at ASC"
-        params: list[Any] = []
-        if limit > 0:
-            query += " LIMIT ? OFFSET ?"
-            params.extend([int(limit), int(offset)])
-        elif offset > 0:
-            # SQLite requires LIMIT when OFFSET is used.
-            query += " LIMIT -1 OFFSET ?"
-            params.append(int(offset))
+def load_posts(csv_path: Path, limit: int, offset: int) -> list[dict[str, str]]:
+    with(open(csv_path, "r", encoding="utf-8")) as f:
+        header = f.readline()
+        if not header:
+            return []
+        columns = [col.strip() for col in header.split(",")]
+        if "post_id" not in columns or "link" not in columns:
+            raise ValueError("CSV must contain 'post_id' and 'link' columns")
 
-        rows = conn.execute(query, params).fetchall()
-        return [{"post_id": str(r["post_id"]), "link": str(r["link"])} for r in rows]
-    finally:
-        conn.close()
+    posts = []
+    with(open(csv_path, "r", encoding="utf-8")) as f:
+        for line in f:
+            if line.strip():
+                values = [v.strip() for v in line.split(",")]
+                if len(values) >= 2:
+                    posts.append({"post_id": values[0], "link": values[1]})
+
+    if limit > 0:
+        posts = posts[:limit]
+    if offset > 0:
+        posts = posts[offset:]
+
+    return posts
+    
 
 
 def main() -> None:
+    # 解析CSV文件路径和输出目录等参数
     args = parse_args()
-    db_path = Path(args.db_path)
+    csv_path = Path(args.csv_path)
     output_dir = Path(args.output_dir)
     ensure_dir(output_dir)
 
-    if not db_path.exists():
-        raise FileNotFoundError(f"DB not found: {db_path}")
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV not found: {csv_path}")
 
-    posts = load_posts(db_path=db_path, limit=args.limit, offset=args.offset)
+    posts = load_posts(csv_path=csv_path, limit=args.limit, offset=args.offset)
     if not posts:
-        print("[fetch-html] no posts found in DB for given limit/offset")
+        print("[fetch-html] no posts found in CSV for given limit/offset")
         return
 
-    print(f"[fetch-html] loaded posts from db: {len(posts)}")
+    print(f"[fetch-html] loaded posts from csv: {len(posts)}")
 
+
+    # 创建浏览器上下文
     playwright_obj, context = create_browser_context(
         headless=args.headless,
         user_data_dir=args.user_data_dir,
@@ -454,7 +463,6 @@ def main() -> None:
             post_id = row["post_id"]
             url = row["link"]
             html_path = output_dir / f"{post_id}.html"
-            png_path = output_dir / f"{post_id}.png"
 
             if html_path.exists() and not args.overwrite:
                 skipped_count += 1
@@ -491,12 +499,6 @@ def main() -> None:
 
                 html_path.write_text(html_content, encoding="utf-8")
 
-                if args.save_screenshot:
-                    try:
-                        page.screenshot(path=str(png_path), full_page=True)
-                    except Exception:
-                        pass
-
                 ok_count += 1
             except Exception as exc:
                 failed_count += 1
@@ -513,7 +515,7 @@ def main() -> None:
         safe_close_browser(playwright_obj, context)
 
     summary = {
-        "db_path": str(db_path),
+        "csv_path": str(csv_path),
         "output_dir": str(output_dir),
         "total_requested": len(posts),
         "ok": ok_count,
@@ -527,15 +529,15 @@ def main() -> None:
             "min_post_age_days": int(args.min_post_age_days),
         },
     }
-    summary_path = output_dir / "fetch_pages_from_db_summary.json"
+    summary_path = output_dir / "fetch_pages_from_csv_summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if failures:
-        failure_path = output_dir / "fetch_pages_from_db_failures.json"
+        failure_path = output_dir / "fetch_pages_from_csv_failures.json"
         failure_path.write_text(json.dumps(failures, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if filtered_details:
-        filtered_path = output_dir / "fetch_pages_from_db_filtered.json"
+        filtered_path = output_dir / "fetch_pages_from_csv_filtered.json"
         filtered_path.write_text(json.dumps(filtered_details, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(

@@ -4,12 +4,15 @@ import argparse
 import csv
 import json
 import sqlite3
+import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from config import CRAWLER_V2_ARG_DEFINITIONS, CRAWLER_V2_DEFAULT_DB_NAME
 from crawler_util import ensure_dir
 
 try:
@@ -17,10 +20,6 @@ try:
 except ImportError:  # pragma: no cover
     sync_playwright = None
 
-
-DEFAULT_OUTPUT_DIR = Path("update_news_v2")         # 输出目录，包含SQLite数据库和导出的CSV/JSON文件
-DEFAULT_USER_DATA_DIR = Path("tmp_chrome_profile")  # 用于持久化登录状态的Chromium用户数据目录
-DEFAULT_DB_NAME = "square_posts_v2.db"              # SQLite数据库文件名
 SQUARE_HOME_URL_TEMPLATE = "https://www.binance.com/{lang}/square"
 
 
@@ -32,47 +31,8 @@ def parse_args() -> argparse.Namespace:
             "target-driven collection, and resumable runs."
         )
     )
-    parser.add_argument("--lang", default="en", help="Square language, e.g. en / zh-CN")
-    parser.add_argument("--target-posts", type=int, default=5000, help="Stop when unique posts in DB reach this count")
-    parser.add_argument("--max-scroll-rounds", type=int, default=3000, help="Max scroll rounds for this run")
-    parser.add_argument("--idle-stop-rounds", type=int, default=50, help="Stop if no new post appears for N rounds")
-    parser.add_argument("--pause-seconds", type=float, default=1.0, help="Pause between rounds")
-    parser.add_argument("--scroll-pixels", type=int, default=2600, help="Wheel scroll pixels per round")
-    parser.add_argument("--max-runtime-minutes", type=float, default=0.0, help="0 means unlimited runtime")
-    parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
-    parser.add_argument("--wait-for-login", action="store_true", help="Pause for manual login before collecting")
-    parser.add_argument(
-        "--user-data-dir",
-        default=str(DEFAULT_USER_DATA_DIR),
-        help=f"Persistent Chromium profile dir, default: {DEFAULT_USER_DATA_DIR}",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default=str(DEFAULT_OUTPUT_DIR),
-        help=f"Output directory, default: {DEFAULT_OUTPUT_DIR}",
-    )
-    parser.add_argument(
-        "--db-path",
-        default="",
-        help="SQLite path; defaults to <output-dir>/square_posts_v2.db",
-    )
-    parser.add_argument(
-        "--export-limit",
-        type=int,
-        default=0,
-        help="Export first N rows to CSV/JSON; 0 means export all stored rows",
-    )
-    parser.add_argument(
-        "--checkpoint-every",
-        type=int,
-        default=20,
-        help="Print progress every N rounds",
-    )
-    parser.add_argument(
-        "--check-only",
-        action="store_true",
-        help="Only open Square page and verify browser workflow",
-    )
+    for arg in CRAWLER_V2_ARG_DEFINITIONS:
+        parser.add_argument(*arg["flags"], **arg["kwargs"])
     return parser.parse_args()
 
 
@@ -129,6 +89,44 @@ def safe_close_browser(playwright_obj: Any, context: Any) -> None:
         context.close()
     finally:
         playwright_obj.stop()
+
+
+def run_html_fetch_stage(args: argparse.Namespace, db_path: Path) -> None:
+    if not args.fetch_html:
+        return
+
+    fetch_script = Path(__file__).resolve().with_name("fetch_pages_from_db.py")
+    if not fetch_script.exists():
+        raise FileNotFoundError(f"fetch_pages_from_db.py not found: {fetch_script}")
+
+    command = [
+        sys.executable,
+        str(fetch_script),
+        "--db-path",
+        str(db_path),
+        "--output-dir",
+        str(args.html_output_dir),
+        "--limit",
+        str(int(args.html_limit)),
+        "--offset",
+        str(int(args.html_offset)),
+        "--user-data-dir",
+        str(args.user_data_dir),
+        "--pause-seconds",
+        str(float(args.pause_seconds)),
+        "--timeout-seconds",
+        "60",
+    ]
+
+    if args.headless:
+        command.append("--headless")
+    if args.html_overwrite:
+        command.append("--overwrite")
+    if int(args.min_post_age_days) > 0:
+        command.extend(["--min-post-age-days", str(int(args.min_post_age_days))])
+
+    print("[v2] html-stage command:", " ".join(command))
+    subprocess.run(command, check=True)
 
 
 # 创建一个新的SQLite数据库连接，并初始化post表结构，用来存储爬取到的帖子数据和爬虫运行日志
@@ -318,7 +316,7 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     ensure_dir(output_dir)
 
-    db_path = Path(args.db_path) if args.db_path else output_dir / DEFAULT_DB_NAME
+    db_path = Path(args.db_path) if args.db_path else output_dir / CRAWLER_V2_DEFAULT_DB_NAME
     csv_path = output_dir / "binance_square_posts.csv"
     raw_json_path = output_dir / "binance_square_posts_raw.json"
     run_summary_path = output_dir / "crawler_v2_last_run.json"
@@ -401,6 +399,7 @@ def main() -> None:
         )
         print("[v2] target already reached in existing DB, exported snapshot and exited")
         conn.close()
+        run_html_fetch_stage(args, db_path)
         return
 
     playwright_obj, context = create_browser_context(
@@ -500,6 +499,7 @@ def main() -> None:
         stop_reason=stop_reason,
     )
     conn.close()
+    run_html_fetch_stage(args, db_path)
 
     print(
         f"[v2] done: stop_reason={stop_reason} new_added={new_added_total} "

@@ -14,10 +14,12 @@ import json
 import re
 import html
 import argparse
+from urllib.parse import urljoin, urlsplit, parse_qs
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import sys
+import requests
 
 
 def extract_app_data(html_content: str) -> Optional[Dict[str, Any]]:
@@ -288,6 +290,228 @@ def extract_products_from_html(
     return products
 
 
+def extract_post_url(html_content: str, post_id: str, meta_info: Dict[str, Any]) -> str:
+    """提取帖子URL，优先结构化数据，其次从HTML链接回退。"""
+    url = str(meta_info.get("url") or "").strip()
+    if url and "/square/post/" in url:
+        return url
+
+    match = re.search(
+        rf'href=["\']([^"\']*/square/post/{re.escape(post_id)}[^"\']*)["\']',
+        html_content,
+        re.IGNORECASE,
+    )
+    if match:
+        return urljoin("https://www.binance.com", html.unescape(match.group(1)))
+    return ""
+
+
+def extract_post_region(post_url: str) -> str:
+    """从帖子URL中提取地区/语言段（如 zh-CN, en）。"""
+    if not post_url:
+        return ""
+    match = re.search(r"binance\.com/([^/]+)/square/post/", post_url, re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def extract_first_product_url_and_market(html_content: str, post_id: str) -> tuple[str, str]:
+    """提取第一个产品URL及市场类型（spot/futures）。"""
+    pattern = re.compile(
+        rf'href=["\']([^"\']*(?:/trade/|/futures/|/price/)[^"\']*\?[^"\']*contentId={re.escape(post_id)}[^"\']*)["\']',
+        re.IGNORECASE,
+    )
+    match = pattern.search(html_content)
+    if not match:
+        return "", ""
+
+    url = urljoin("https://www.binance.com", html.unescape(match.group(1)))
+    market_type = ""
+    query = parse_qs(urlsplit(url).query)
+    if query.get("type"):
+        market_type = str(query["type"][0]).lower()
+    elif "/futures/" in url.lower():
+        market_type = "futures"
+    elif "/trade/" in url.lower() or "/price/" in url.lower():
+        market_type = "spot"
+    return url, market_type
+
+
+def extract_symbol_from_product_url(first_product_url: str, first_product: str) -> str:
+    """从产品URL中推断交易对symbol（优先URL，其次first_product补USDT）。"""
+    if first_product_url:
+        path = urlsplit(first_product_url).path
+        parts = [p for p in path.split("/") if p]
+        if parts:
+            raw = parts[-1]
+            symbol = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+            if symbol:
+                if symbol.endswith("USDT"):
+                    return symbol
+                # /trade/ETH_USDT -> ETHUSDT is already covered; /price/ETH fallback
+                if len(symbol) <= 10:
+                    return f"{symbol}USDT"
+
+    fallback = normalize_product_symbol(first_product)
+    if fallback:
+        if fallback.endswith("USDT"):
+            return fallback
+        return f"{fallback}USDT"
+    return ""
+
+
+def extract_comment_timestamp_map_from_app_data(app_data: Dict[str, Any]) -> Dict[str, int]:
+    """从APP_DATA提取 comment_id -> 绝对时间戳(ms)。"""
+    timestamp_map: Dict[str, int] = {}
+
+    def to_ms(value: Any) -> int:
+        if value is None:
+            return 0
+        text = str(value).strip()
+        if not text:
+            return 0
+        if text.isdigit():
+            num = int(text)
+            return num if num > 10**12 else num * 1000
+        try:
+            cleaned = re.sub(r"\.\d+", "", text).replace("Z", "")
+            return int(datetime.fromisoformat(cleaned).timestamp() * 1000)
+        except Exception:
+            return 0
+
+    def walk(node: Any, depth: int = 0) -> None:
+        if depth > 14:
+            return
+        if isinstance(node, dict):
+            comment_id = node.get("commentId") or node.get("id")
+            ts = (
+                node.get("createTime")
+                or node.get("commentTime")
+                or node.get("date")
+                or node.get("time")
+            )
+            if comment_id is not None:
+                ts_ms = to_ms(ts)
+                if ts_ms > 0:
+                    timestamp_map[str(comment_id)] = ts_ms
+
+            for value in node.values():
+                walk(value, depth + 1)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, depth + 1)
+
+    walk(app_data)
+    return timestamp_map
+
+
+def fetch_price_at(symbol: str, market_type: str, ts_ms: int, interval: str) -> tuple[Optional[float], str]:
+    """按时间点获取最邻近K线收盘价。"""
+    if not symbol or ts_ms <= 0:
+        return None, "invalid_symbol_or_timestamp"
+
+    market = (market_type or "spot").lower()
+    if market == "futures":
+        endpoint = "https://fapi.binance.com/fapi/v1/klines"
+    else:
+        endpoint = "https://api.binance.com/api/v3/klines"
+
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "startTime": ts_ms,
+        "limit": 1,
+    }
+    try:
+        resp = requests.get(endpoint, params=params, timeout=12)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        return None, f"price_api_error:{exc}"
+
+    if not isinstance(payload, list) or not payload:
+        return None, "no_kline_data"
+
+    try:
+        close_price = float(payload[0][4])
+        return close_price, ""
+    except Exception:
+        return None, "invalid_kline_format"
+
+
+def annotate_comment_blocks(
+    comments: List[Dict[str, Any]],
+    timestamp_map: Dict[str, int],
+    symbol: str,
+    market_type: str,
+    t_window_hours: int,
+    price_interval: str,
+    fallback_t0_ms: int = 0,
+) -> str:
+    """按讨论块（根评论+回复）打标签。"""
+    if not comments:
+        return ""
+    if not symbol:
+        for comment in comments:
+            comment["t0"] = ""
+            comment["t_window"] = f"{t_window_hours}h"
+            comment["p0"] = None
+            comment["p1"] = None
+            comment["label"] = None
+            comment["comment_error"] = "missing_symbol"
+        return "missing_symbol"
+
+    price_cache: Dict[int, tuple[Optional[float], str]] = {}
+
+    def collect_ids(node: Dict[str, Any], bucket: List[str]) -> None:
+        cid = str(node.get("original_comment_id") or node.get("comment_id") or "")
+        if cid:
+            bucket.append(cid)
+        for rep in node.get("replies", []):
+            collect_ids(rep, bucket)
+
+    for comment in comments:
+        ids: List[str] = []
+        collect_ids(comment, ids)
+        ts_values = [timestamp_map.get(cid, 0) for cid in ids]
+        ts_values = [v for v in ts_values if v > 0]
+        if not ts_values:
+            if fallback_t0_ms > 0:
+                ts_values = [fallback_t0_ms]
+            else:
+                comment["t0"] = ""
+                comment["t_window"] = f"{t_window_hours}h"
+                comment["p0"] = None
+                comment["p1"] = None
+                comment["label"] = None
+                comment["comment_error"] = "missing_comment_timestamp"
+                continue
+
+        t0_ms = max(ts_values)
+        t1_ms = t0_ms + int(t_window_hours) * 3600 * 1000
+
+        if t0_ms not in price_cache:
+            price_cache[t0_ms] = fetch_price_at(symbol, market_type, t0_ms, price_interval)
+        if t1_ms not in price_cache:
+            price_cache[t1_ms] = fetch_price_at(symbol, market_type, t1_ms, price_interval)
+
+        p0, err0 = price_cache[t0_ms]
+        p1, err1 = price_cache[t1_ms]
+
+        comment["t0"] = datetime.fromtimestamp(t0_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        comment["t_window"] = f"{t_window_hours}h"
+        comment["p0"] = p0
+        comment["p1"] = p1
+
+        if p0 is None or p1 is None:
+            comment["label"] = None
+            comment["comment_error"] = err0 or err1 or "price_unavailable"
+        else:
+            comment["label"] = 1 if p1 > p0 else -1
+            comment["comment_error"] = "fallback_post_time" if not [v for v in [timestamp_map.get(cid, 0) for cid in ids] if v > 0] else ""
+
+    return ""
+
+
 def find_post_data_in_app_data(app_data: Dict[str, Any], post_id: str) -> Dict[str, Any]:
     """在APP_DATA中查找帖子数据"""
     result = {}
@@ -346,7 +570,7 @@ def find_comments_in_app_data(app_data: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "comment_id": data.get("commentId") or data.get("id") or "",
                     "author": data.get("authorName") or data.get("nickName") or "",
                     "text": data.get("commentContent") or data.get("commentText") or "",
-                    "time": data.get("createTime") or data.get("commentTime") or "",
+                    "time": data.get("createTime") or data.get("commentTime") or data.get("date") or data.get("time") or "",
                     "like_count": data.get("likeCount") or data.get("upCount") or 0,
                     "reply_count": data.get("replyCount") or 0,
                     "parent_comment_id": parent_id
@@ -361,7 +585,7 @@ def find_comments_in_app_data(app_data: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "comment_id": data.get("id") or "",
                         "author": data.get("authorName") or data.get("nickName") or "",
                         "text": data.get("content") or "",
-                        "time": data.get("createTime") or "",
+                        "time": data.get("createTime") or data.get("commentTime") or data.get("date") or data.get("time") or "",
                         "like_count": data.get("likeCount") or 0,
                         "reply_count": data.get("replyCount") or 0,
                         "parent_comment_id": parent_id
@@ -570,7 +794,7 @@ def format_comment_for_output(comment: Dict[str, Any], id_counter: Dict[str, int
     id_counter["value"] += 1
     author = comment.get("author", "")
     text = comment.get("text", "")
-    post_time = comment.get("time", "")
+    post_time = parse_datetime(comment.get("time", ""))
     original_comment_id = str(comment.get("original_comment_id") or comment.get("comment_id") or "")
     
     return {
@@ -583,7 +807,7 @@ def format_comment_for_output(comment: Dict[str, Any], id_counter: Dict[str, int
     }
 
 
-def parse_html_file(html_file: Path) -> Dict[str, Any]:
+def parse_html_file(html_file: Path, t_window_hours: int = 24, price_interval: str = "1h") -> Dict[str, Any]:
     """解析单个HTML文件"""
     print(f"解析文件: {html_file.name}")
     
@@ -604,6 +828,8 @@ def parse_html_file(html_file: Path) -> Dict[str, Any]:
         post_data = {}
         if app_data:
             post_data = find_post_data_in_app_data(app_data, post_id)
+
+        comment_timestamp_map = extract_comment_timestamp_map_from_app_data(app_data) if app_data else {}
         
         # 获取评论数据
         comments = []
@@ -640,20 +866,47 @@ def parse_html_file(html_file: Path) -> Dict[str, Any]:
             ""
         )
 
+        fallback_t0_ms = 0
+        raw_post_ts = post_data.get("createTime") or meta_info.get("published_date")
+        if raw_post_ts is not None:
+            raw_ts_text = str(raw_post_ts).strip()
+            if raw_ts_text.isdigit():
+                num = int(raw_ts_text)
+                fallback_t0_ms = num if num > 10**12 else num * 1000
+            else:
+                try:
+                    cleaned = re.sub(r"\.\d+", "", raw_ts_text).replace("Z", "")
+                    fallback_t0_ms = int(datetime.fromisoformat(cleaned).timestamp() * 1000)
+                except Exception:
+                    fallback_t0_ms = 0
+
         product = extract_products_from_html(
             html_content=content,
             post_id=post_id,
             post_content=post_content,
             post_data=post_data,
         )
+
+        first_product = product[0] if product else ""
+        first_product_url, market_type = extract_first_product_url_and_market(content, post_id)
+        symbol_for_label = extract_symbol_from_product_url(first_product_url, first_product)
+        post_url = extract_post_url(content, post_id, meta_info)
+        post_region = extract_post_region(post_url)
         
         result = {
             "source_file": str(html_file),
             "post_id": post_id,
-            "product": product,
+            "post_url": post_url,
             "post_author": post_author,
             "post_content": post_content,
+            "post_region": post_region,
             "post_time": post_time,
+            "products": product,
+            "first_product": first_product,
+            "first_product_url": first_product_url,
+            "market_type": market_type or "spot",
+            "comment_num": 0,
+            "comment_total_num": 0,
             "comments": []
         }
 
@@ -662,6 +915,29 @@ def parse_html_file(html_file: Path) -> Dict[str, Any]:
             format_comment_for_output(comment, id_counter)
             for comment in comment_tree
         ]
+
+        # comment_num: 根评论数; comment_total_num: 含回复总数
+        result["comment_num"] = len(result["comments"])
+
+        def count_all(nodes: List[Dict[str, Any]]) -> int:
+            total = 0
+            for node in nodes:
+                total += 1
+                total += count_all(node.get("replies", []))
+            return total
+
+        result["comment_total_num"] = count_all(result["comments"])
+
+        label_error = annotate_comment_blocks(
+            comments=result["comments"],
+            timestamp_map=comment_timestamp_map,
+            symbol=symbol_for_label,
+            market_type=result["market_type"],
+            t_window_hours=t_window_hours,
+            price_interval=price_interval,
+            fallback_t0_ms=fallback_t0_ms,
+        )
+        result["label_error"] = label_error
         
         return result
         
@@ -674,24 +950,32 @@ def parse_html_file(html_file: Path) -> Dict[str, Any]:
         return {
             "source_file": str(html_file),
             "post_id": html_file.stem,
-            "product": [],
+            "post_url": "",
             "post_author": "",
             "post_content": "",
+            "post_region": "",
             "post_time": "",
+            "products": [],
+            "first_product": "",
+            "first_product_url": "",
+            "market_type": "",
+            "comment_num": 0,
+            "comment_total_num": 0,
             "comments": [],
+            "label_error": "",
             "error": str(e)
         }
 
 
-def parse_html_directory(input_dir: Path) -> List[Dict[str, Any]]:
-    """解析目录中的所有HTML文件"""
+"""解析目录中的所有HTML文件"""
+def parse_html_directory(input_dir: Path, t_window_hours: int = 24, price_interval: str = "1h") -> List[Dict[str, Any]]:
     html_files = list(input_dir.glob("*.html"))
     if not html_files:
         raise ValueError(f"在目录中未找到HTML文件: {input_dir}")
     
     results = []
     for html_file in html_files:
-        result = parse_html_file(html_file)
+        result = parse_html_file(html_file, t_window_hours=t_window_hours, price_interval=price_interval)
         if result:
             results.append(result)
     
@@ -709,6 +993,7 @@ def write_output(output_file: Path, data: List[Dict[str, Any]]):
 
 
 def main():
+    # 命令行参数解析
     parser = argparse.ArgumentParser(
         description="Binance Square HTML解析器 - 提取帖子信息和评论数据"
     )
@@ -730,16 +1015,33 @@ def main():
         action="store_true",
         help="批量处理目录中的所有HTML文件"
     )
+
+    parser.add_argument(
+        "--t-window-hours",
+        type=int,
+        default=24,
+        help="评论块打标窗口（小时），默认 24"
+    )
+
+    parser.add_argument(
+        "--price-interval",
+        default="1h",
+        help="K线周期（如 1m/5m/1h），默认 1h"
+    )
     
     args = parser.parse_args()
     input_path = Path(args.input)
     output_path = Path(args.output)
     
     try:
+        # 批量处理目录
         if args.batch or input_path.is_dir():
-            # 批量处理目录
             print(f"批量解析目录: {input_path}")
-            results = parse_html_directory(input_path)
+            results = parse_html_directory(
+                input_path,
+                t_window_hours=args.t_window_hours,
+                price_interval=args.price_interval,
+            )
             if results:
                 write_output(output_path, results)
                 print(f"成功解析 {len(results)} 个HTML文件")
@@ -749,7 +1051,11 @@ def main():
         elif input_path.is_file():
             # 解析单个文件
             print(f"解析单个文件: {input_path}")
-            result = parse_html_file(input_path)
+            result = parse_html_file(
+                input_path,
+                t_window_hours=args.t_window_hours,
+                price_interval=args.price_interval,
+            )
             if result:
                 write_output(output_path, [result])
                 print("单个文件解析完成")

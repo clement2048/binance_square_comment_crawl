@@ -11,11 +11,8 @@ import requests
 from requests import RequestException
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from crawler_comment import click_comment_entry
-from crawler_comment import extract_comment_cards_from_dom
-from crawler_comment import extract_comment_rows_from_payload
-from crawler_comment import extract_comments_from_dom
-from crawler_comment import extract_post_meta_from_page
+from crawler_comment import click_comment_entry, extract_comment_cards_from_dom, extract_comment_rows_from_payload, extract_comments_from_dom, extract_post_meta_from_page
+from config import CRAWLER_ARG_DEFINITIONS
 
 from crawler_util import clean_text
 from crawler_util import dump_page_content
@@ -31,10 +28,6 @@ except ImportError:  # pragma: no cover
     Page = Any  # type: ignore[assignment]
     sync_playwright = None
 
-
-BINANCE_NEWS_API = "https://www.binance.com/bapi/composite/v4/friendly/pgc/feed/news/list"
-DEFAULT_OUTPUT_DIR = Path("update_news")
-DEFAULT_USER_DATA_DIR = Path("tmp_chrome_profile")
 SQUARE_HOME_URL_TEMPLATE = "https://www.binance.com/{lang}/square"
 COMMENT_DEBUG_DIR_NAME = "binance_square_comment_debug"
 PAGE_DUMP_DIR_NAME = "binance_square_page_dump"
@@ -54,96 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="抓取币安广场帖子列表以及评论，并导出 CSV/JSON 文件。"
     )
-    parser.add_argument("--pages", type=int, default=3, help="抓取帖子列表的页数，默认 3")
-    parser.add_argument("--page-size", type=int, default=20, help="每页帖子数，默认 20")
-    parser.add_argument("--max-posts", type=int, default=50, help="最多处理多少条帖子，默认 50")
-    parser.add_argument(
-        "--max-comments",
-        type=int,
-        default=30,
-        help="每条帖子最多抓取多少条评论，默认 30",
-    )
-    parser.add_argument(
-        "--min-comment-count",
-        type=int,
-        default=1,
-        help="只处理评论数不小于该值的帖子，默认 1",
-    )
-    parser.add_argument("--lang", default="zh-CN", help="页面语言，默认 zh-CN")
-    parser.add_argument(
-        "--source",
-        choices=["news", "square-home"],
-        default="news",
-        help="帖子来源：news=新闻流接口，square-home=币安广场首页滚动采集",
-    )
-    parser.add_argument(
-        "--headless",
-        action="store_true",
-        help="使用无头浏览器抓取评论，默认关闭，便于调试",
-    )
-    parser.add_argument(
-        "--skip-comments",
-        action="store_true",
-        help="只抓帖子，不抓评论",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default=str(DEFAULT_OUTPUT_DIR),
-        help=f"输出目录，默认 {DEFAULT_OUTPUT_DIR}",
-    )
-    parser.add_argument(
-        "--request-timeout",
-        type=int,
-        default=20,
-        help="HTTP 请求超时秒数，默认 20",
-    )
-    parser.add_argument(
-        "--pause-seconds",
-        type=float,
-        default=1.2,
-        help="抓取每条帖子评论之间的等待时间，默认 1.2 秒",
-    )
-    parser.add_argument(
-        "--user-data-dir",
-        default=str(DEFAULT_USER_DATA_DIR),
-        help=f"Chromium 用户目录，默认 {DEFAULT_USER_DATA_DIR}，用于复用登录态",
-    )
-    parser.add_argument(
-        "--wait-for-login",
-        action="store_true",
-        help="打开页面后暂停，等你手动登录并回车，再继续抓取",
-    )
-    parser.add_argument(
-        "--trust-env-proxy",
-        action="store_true",
-        help="默认不读取系统代理环境变量；如果你确定代理可用，再显式开启",
-    )
-    parser.add_argument(
-        "--news-api",
-        default=BINANCE_NEWS_API,
-        help="帖子列表接口地址，默认使用当前脚本内置的 Binance Square 列表接口",
-    )
-    parser.add_argument(
-        "--retries",
-        type=int,
-        default=2,
-        help="帖子列表接口失败后的重试次数，默认 2",
-    )
-    parser.add_argument(
-        "--check-only",
-        action="store_true",
-        help="只检查接口和网络可达性，不写出帖子和评论文件",
-    )
-    parser.add_argument(
-        "--save-comment-debug",
-        action="store_true",
-        help="保存命中的评论接口原始响应，便于排查评论字段和接口路径",
-    )
-    parser.add_argument(
-        "--dump-page",
-        action="store_true",
-        help="保存帖子详情页的 HTML、纯文本和截图，便于手动筛选页面结构",
-    )
+    for arg in CRAWLER_ARG_DEFINITIONS:
+        parser.add_argument(*arg["flags"], **arg["kwargs"])
     return parser.parse_args()
 
 

@@ -29,6 +29,9 @@ playwright install chromium
 
 ```bash
 python crawler_v2.py --lang en --target-posts 5000 --max-scroll-rounds 20000 --idle-stop-rounds 200 --wait-for-login --output-dir update_news_v2
+
+# 一键：采集后自动进入 HTML 下载阶段，并只保留至少 3 天前的帖子
+python crawler_v2.py --lang en --target-posts 5000 --max-scroll-rounds 20000 --idle-stop-rounds 200 --wait-for-login --output-dir update_news_v2 --fetch-html --html-limit 500 --min-post-age-days 3 --headless
 ```
 
 说明：
@@ -50,11 +53,19 @@ python fetch_pages_from_db.py --db-path update_news_v2/square_posts_v2.db --outp
 
 # 分批拉取（例如第 201~400 条）
 python fetch_pages_from_db.py --db-path update_news_v2/square_posts_v2.db --output-dir update_news/binance_square_page_dump --offset 200 --limit 200 --headless
+
+# 只保留“至少3天前”的帖子，且评论总数不少于5并且有产品
+python fetch_pages_from_db.py --db-path update_news_v2/square_posts_v2.db --output-dir update_news/binance_square_page_dump --limit 500 --headless --min-post-age-days 3 --min-comment-total 5 --require-products
 ```
 
 说明：
 - 默认会跳过已存在 HTML 文件（日志中的 `skipped` 是正常行为）。
 - 默认只保存 HTML，较省空间；可选 `--save-screenshot` 保存截图。
+- 预筛选参数（下载前置质量控制）：
+	- `--min-comment-total`：评论总数下限（默认 0，表示不筛选）
+	- `--require-products`：要求能提取到产品符号
+	- `--min-post-age-days`：帖子最小帖龄（天），例如 `3` 表示至少 3 天前的帖子
+- 触发筛选的帖子不会写入 HTML，原因会记录在 `fetch_pages_from_db_filtered.json`。
 
 ### 3) 批量解析 HTML
 
@@ -106,6 +117,15 @@ python fetch_pages_from_db.py --check-only --db-path update_news_v2/square_posts
 - `update_news/binance_square_page_dump/*.html`
 - `update_news/binance_square_page_dump/fetch_pages_from_db_summary.json`
 - `update_news/binance_square_page_dump/fetch_pages_from_db_failures.json`（仅失败时生成）
+- `update_news/binance_square_page_dump/fetch_pages_from_db_filtered.json`（仅有筛选命中时生成）
+
+## 参数配置化（binance_square_crawler）
+
+- `binance_square_crawler.py` 的命令行参数定义已迁移到 `config.py` 中统一管理。
+- `crawler_v2.py` 的命令行参数定义也已迁移到 `config.py` 中统一管理。
+- 当前 `parse_args` 通过读取 `config.py` 中的参数定义循环注册，便于后续维护。
+- 现有命令行参数名称与行为保持不变。
+- `crawler_v2.py` 的命令行参数同样已迁移到 `config.py` 统一管理。
 
 ### parse 输出
 
