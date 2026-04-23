@@ -21,3 +21,4 @@ update_news_v2/binance_square_posts_raw.json
 update_news_v2/binance_square_posts.csv
 update_news_v2/square_posts_v2.db
 update_news_v2/crawler_v2_last_run.json
+update_news_v2/square_posts_v2.db
