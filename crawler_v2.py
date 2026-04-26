@@ -325,6 +325,15 @@ def main() -> None:
     conn.row_factory = sqlite3.Row
     init_db(conn)
 
+    '''
+    连接数据集并且添加记录
+    参数:
+        start_at: 爬虫开始时间
+        lang: Square页面语言版本
+        target_posts:
+        max_scroll_rounds:
+        idle_stop_rounds:
+    '''
     started_at = now_text()
     run_row = conn.execute(
         """
@@ -344,7 +353,8 @@ def main() -> None:
 
     existing_before = count_posts(conn)
     print(f"[v2] existing unique posts in db={existing_before}")
-
+    
+    # 测试模式，查看是否能够连接币安
     if args.check_only:
         playwright_obj, context = create_browser_context(
             headless=args.headless,
@@ -407,9 +417,9 @@ def main() -> None:
         user_data_dir=args.user_data_dir,
     )
 
-    rounds_done = 0
-    new_added_total = 0
-    idle_rounds = 0
+    rounds_done = 0     # 已经完成滚动的轮数
+    new_added_total = 0 # 新添加的帖子数量
+    idle_rounds = 0     # 连续未添加新帖的轮数，用于判断是否出现了网络等问题，导致无法获取新的帖子
     stop_reason = "max_scroll_rounds_reached"
     start_epoch = time.time()
 

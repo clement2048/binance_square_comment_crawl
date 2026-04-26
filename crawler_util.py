@@ -110,6 +110,47 @@ def extract_first_number(node: Any, keys: list[str]) -> int | str:
     return ""
 
 
+def extract_richtext_text(body: Any) -> str:
+    """Extract plain text from Binance RichText JSON format.
+
+    The RichText format stores text in:
+      body (JSON string) → hash → {block_id} → config → content → items
+      where items have id="RichTextText" → config → content (actual text)
+    """
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except json.JSONDecodeError:
+            return clean_text(body)
+
+    if not isinstance(body, dict):
+        return clean_text(str(body)) if body else ""
+
+    hash_data = body.get("hash")
+    if not isinstance(hash_data, dict):
+        return ""
+
+    texts: list[str] = []
+    for block in hash_data.values():
+        if not isinstance(block, dict):
+            continue
+        config = block.get("config")
+        if not isinstance(config, dict):
+            continue
+        content_list = config.get("content")
+        if not isinstance(content_list, list):
+            continue
+        for item in content_list:
+            if not isinstance(item, dict):
+                continue
+            if item.get("id") == "RichTextText":
+                text = item.get("config", {}).get("content", "")
+                if text and isinstance(text, str):
+                    texts.append(text)
+
+    return clean_text("".join(texts)) if texts else ""
+
+
 def dump_page_content(page: Any, dump_dir: Path, post_id: str) -> None:
     """Save page HTML, text, and screenshot for debugging and offline parsing."""
     ensure_dir(dump_dir)

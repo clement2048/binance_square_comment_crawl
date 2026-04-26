@@ -71,6 +71,11 @@ def parse_args() -> argparse.Namespace:
         help="Only save posts that are at least N days old, 0 means disabled",
     )
     parser.add_argument("--check-only", action="store_true", help="Only verify DB and browser setup")
+    parser.add_argument(
+        "--table",
+        default="posts",
+        help="Table name to read from, default: posts (use 'coin_posts' for crawler_coin.py output)",
+    )
     return parser.parse_args()
 
 

@@ -144,3 +144,20 @@ python fetch_pages_from_db.py --check-only --db-path update_news_v2/square_posts
 2. 大批量下载建议使用 `--offset + --limit` 分批执行，便于失败重试。
 3. 若空间紧张，优先只存 HTML，不保存截图。
 4. 解析前先抽样检查 5-10 个 HTML 的页面完整性。
+
+
+
+
+
+## Deepseek 修改版本
+
+ 用法
+
+  # 先看命中率
+  python crawler_coin.py --check-only --symbols BTC,ETH,SOL
+
+  # 正式采集
+  python crawler_coin.py --symbols BTC,ETH,SOL --max-posts 200 --max-pages 80
+
+  # 采集 + 下载 HTML
+  python crawler_coin.py --symbols BTC --max-posts 100 --fetch-html --headless
